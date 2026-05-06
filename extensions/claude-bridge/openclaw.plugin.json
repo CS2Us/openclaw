@@ -1,0 +1,41 @@
+{
+  "id": "claude-bridge",
+  "name": "Claude Bridge",
+  "description": "Forward chat /claude commands to local Claude Code (`claude -p`) running in a fixed project directory.",
+  "activation": {
+    "onStartup": true
+  },
+  "contracts": {
+    "commands": ["claude"]
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "projectCwd": {
+        "type": "string",
+        "description": "Absolute path to the project directory where `claude` runs. Falls back to env OPENCLAW_CLAUDE_BRIDGE_CWD."
+      },
+      "claudeBin": {
+        "type": "string",
+        "default": "claude",
+        "description": "Name or absolute path of the claude CLI binary."
+      },
+      "allowedTools": {
+        "type": "string",
+        "default": "Read,Edit,Bash(git:*,cargo:*,ls,cat),Grep,Glob",
+        "description": "Comma-separated allow-list passed to `claude --allowed-tools`."
+      },
+      "timeoutMs": {
+        "type": "number",
+        "default": 300000,
+        "description": "Max ms to wait for claude to finish before killing the process."
+      },
+      "maxReplyChars": {
+        "type": "number",
+        "default": 3500,
+        "description": "Truncate the reply to this many characters (Telegram has a 4096-char hard limit)."
+      }
+    }
+  }
+}
