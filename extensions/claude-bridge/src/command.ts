@@ -25,7 +25,8 @@ export function createClaudeCommand(options: {
 }): OpenClawPluginCommandDefinition {
   return {
     name: "claude",
-    description: "Run a task in local Claude Code (headless `claude -p`) and reply with the result.",
+    description:
+      "Run a task in local Claude Code (headless `claude -p`) and reply with the result.",
     acceptsArgs: true,
     requireAuth: true,
     handler: (ctx) => handleClaudeCommand(ctx, options),
@@ -68,10 +69,11 @@ async function handleClaudeCommand(
 }
 
 function resolveProjectCwd(config: ClaudeBridgeConfig): string | undefined {
-  const fromConfig = config.projectCwd?.trim();
-  if (fromConfig) return fromConfig;
+  // Env var wins so config can stay machine-portable (committable).
   const fromEnv = process.env.OPENCLAW_CLAUDE_BRIDGE_CWD?.trim();
-  return fromEnv || undefined;
+  if (fromEnv) return fromEnv;
+  const fromConfig = config.projectCwd?.trim();
+  return fromConfig || undefined;
 }
 
 type RunResult = {
@@ -90,11 +92,11 @@ function runClaude(params: {
   prompt: string;
 }): Promise<RunResult> {
   return new Promise((resolve, reject) => {
-    const child = spawn(
-      params.bin,
-      ["-p", params.prompt, "--allowed-tools", params.allowedTools],
-      { cwd: params.cwd, env: process.env, stdio: ["ignore", "pipe", "pipe"] },
-    );
+    const child = spawn(params.bin, ["-p", params.prompt, "--allowed-tools", params.allowedTools], {
+      cwd: params.cwd,
+      env: process.env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
 
     let stdout = "";
     let stderr = "";
