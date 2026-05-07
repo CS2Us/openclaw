@@ -39,6 +39,7 @@ export function createTestPluginApi(api: TestPluginApiInput = {}): OpenClawPlugi
     registerWebFetchProvider() {},
     registerWebSearchProvider() {},
     registerInteractiveHandler() {},
+    registerInboundFallthroughHandler() {},
     onConversationBindingResolved() {},
     registerCommand() {},
     registerContextEngine() {},

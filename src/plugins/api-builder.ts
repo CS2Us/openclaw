@@ -46,6 +46,7 @@ export type BuildPluginApiParams = {
       | "registerWebFetchProvider"
       | "registerWebSearchProvider"
       | "registerInteractiveHandler"
+      | "registerInboundFallthroughHandler"
       | "onConversationBindingResolved"
       | "registerCommand"
       | "registerContextEngine"
@@ -113,6 +114,8 @@ const noopRegisterMusicGenerationProvider: OpenClawPluginApi["registerMusicGener
 const noopRegisterWebFetchProvider: OpenClawPluginApi["registerWebFetchProvider"] = () => {};
 const noopRegisterWebSearchProvider: OpenClawPluginApi["registerWebSearchProvider"] = () => {};
 const noopRegisterInteractiveHandler: OpenClawPluginApi["registerInteractiveHandler"] = () => {};
+const noopRegisterInboundFallthroughHandler: OpenClawPluginApi["registerInboundFallthroughHandler"] =
+  () => {};
 const noopOnConversationBindingResolved: OpenClawPluginApi["onConversationBindingResolved"] =
   () => {};
 const noopRegisterCommand: OpenClawPluginApi["registerCommand"] = () => {};
@@ -202,6 +205,8 @@ export function buildPluginApi(params: BuildPluginApiParams): OpenClawPluginApi 
     registerWebSearchProvider: handlers.registerWebSearchProvider ?? noopRegisterWebSearchProvider,
     registerInteractiveHandler:
       handlers.registerInteractiveHandler ?? noopRegisterInteractiveHandler,
+    registerInboundFallthroughHandler:
+      handlers.registerInboundFallthroughHandler ?? noopRegisterInboundFallthroughHandler,
     onConversationBindingResolved:
       handlers.onConversationBindingResolved ?? noopOnConversationBindingResolved,
     registerCommand: handlers.registerCommand ?? noopRegisterCommand,

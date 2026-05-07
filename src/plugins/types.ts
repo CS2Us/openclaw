@@ -2015,6 +2015,36 @@ export type PluginInteractiveRegistration<
 
 export type PluginInteractiveHandlerRegistration = PluginInteractiveRegistration;
 
+/**
+ * Inbound fallthrough seam: when a channel receives a plain (non-command) inbound
+ * message that would otherwise enter the default agent loop, it consults this
+ * registry first. A registered handler can claim the message (e.g. forward it to
+ * a local CLI agent like Claude Code) and short-circuit the default dispatch.
+ *
+ * Only one handler may register per channel. When a handler returns
+ * `{ handled: false }` the channel falls through to the default dispatch.
+ */
+export type PluginInboundFallthroughEvent<TChannel extends string = string> = {
+  channel: TChannel;
+  /** Channel-specific chat / conversation id (telegram chat_id, etc.). */
+  chatId: string;
+  /** Plain text body of the inbound message. */
+  text: string;
+};
+
+export type PluginInboundFallthroughResult =
+  | { handled: true; reply?: string | null }
+  | { handled: false };
+
+export type PluginInboundFallthroughHandler<TChannel extends string = string> = (
+  event: PluginInboundFallthroughEvent<TChannel>,
+) => Promise<PluginInboundFallthroughResult> | PluginInboundFallthroughResult;
+
+export type PluginInboundFallthroughHandlerRegistration<TChannel extends string = string> = {
+  channel: TChannel;
+  handler: PluginInboundFallthroughHandler<TChannel>;
+};
+
 export type OpenClawPluginHttpRouteAuth = "gateway" | "plugin";
 export type OpenClawPluginHttpRouteMatch = "exact" | "prefix";
 export type OpenClawPluginGatewayRuntimeScopeSurface = "write-default" | "trusted-operator";
@@ -2456,6 +2486,17 @@ export type OpenClawPluginApi = {
   /** Register a web search provider (web search capability). */
   registerWebSearchProvider: (provider: WebSearchProviderPlugin) => void;
   registerInteractiveHandler: (registration: PluginInteractiveHandlerRegistration) => void;
+  /**
+   * Register a plain-message fallthrough handler for a given channel. When the
+   * channel receives an inbound message that did not match any slash command,
+   * it consults this handler before invoking the default agent loop. The
+   * handler can claim the message (e.g. forward to a local CLI agent) by
+   * returning `{ handled: true }`; returning `{ handled: false }` falls back to
+   * the default dispatch. Only one handler may register per channel.
+   */
+  registerInboundFallthroughHandler: (
+    registration: PluginInboundFallthroughHandlerRegistration,
+  ) => void;
   onConversationBindingResolved: (
     handler: (event: PluginConversationBindingResolvedEvent) => void | Promise<void>,
   ) => void;

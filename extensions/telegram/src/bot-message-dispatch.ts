@@ -31,6 +31,7 @@ import {
   createOutboundPayloadPlan,
   projectOutboundPayloadPlanForDelivery,
 } from "openclaw/plugin-sdk/outbound-runtime";
+import { dispatchPluginInboundFallthroughHandler } from "openclaw/plugin-sdk/plugin-runtime";
 import { chunkMarkdownTextWithMode } from "openclaw/plugin-sdk/reply-chunking";
 import { clearHistoryEntriesIfEnabled } from "openclaw/plugin-sdk/reply-history";
 import { resolveSendableOutboundReplyParts } from "openclaw/plugin-sdk/reply-payload";
@@ -945,6 +946,38 @@ export const dispatchTelegramMessage = async ({
         }
       } catch (err) {
         logVerbose(`auto-topic-label: session store error: ${formatErrorMessage(err)}`);
+      }
+    }
+
+    // Plugin inbound fallthrough seam. A plugin (e.g. claude-bridge) may
+    // register a handler that claims plain DM text before the default agent
+    // loop runs. If the handler returns `{ handled: true }`, this dispatch
+    // short-circuits — optionally sending the handler-provided reply text.
+    {
+      const fallthroughText = ctxPayload.BodyForAgent ?? "";
+      if (fallthroughText.trim().length > 0) {
+        const fallthroughResult = await dispatchPluginInboundFallthroughHandler({
+          event: {
+            channel: "telegram",
+            chatId: String(chatId),
+            text: fallthroughText,
+          },
+          onError: (err, registration) => {
+            logVerbose(
+              `inbound-fallthrough: handler from plugin "${registration.pluginId}" threw: ${formatErrorMessage(err)}`,
+            );
+          },
+        });
+        if (fallthroughResult.matched && fallthroughResult.handled) {
+          if (fallthroughResult.reply) {
+            try {
+              await bot.api.sendMessage(chatId, fallthroughResult.reply);
+            } catch (err) {
+              logVerbose(`inbound-fallthrough: failed to send reply: ${formatErrorMessage(err)}`);
+            }
+          }
+          return;
+        }
       }
     }
 

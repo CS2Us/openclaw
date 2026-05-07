@@ -81,6 +81,10 @@ import {
 import { normalizePluginHttpPath } from "./http-path.js";
 import { findOverlappingPluginHttpRoute } from "./http-route-overlap.js";
 import {
+  clearPluginInboundFallthroughHandlersForPlugin,
+  registerPluginInboundFallthroughHandler,
+} from "./inbound-fallthrough-registry.js";
+import {
   clearPluginInteractiveHandlersForPlugin,
   registerPluginInteractiveHandler,
 } from "./interactive-registry.js";
@@ -165,6 +169,7 @@ import type {
   PluginHookHandlerMap,
   PluginHookName,
   PluginHookRegistration as TypedPluginHookRegistration,
+  PluginInboundFallthroughHandlerRegistration,
   PluginLogger,
   PluginRegistrationMode,
   ProviderPlugin,
@@ -2318,6 +2323,22 @@ export function createPluginRegistry(registryParams: PluginRegistryParams) {
                   });
                 }
               },
+              registerInboundFallthroughHandler: (
+                registration: PluginInboundFallthroughHandlerRegistration,
+              ) => {
+                const result = registerPluginInboundFallthroughHandler(record.id, registration, {
+                  pluginName: record.name,
+                  pluginRoot: record.rootDir,
+                });
+                if (!result.ok) {
+                  pushDiagnostic({
+                    level: "warn",
+                    pluginId: record.id,
+                    source: record.source,
+                    message: result.error ?? "inbound fallthrough handler registration failed",
+                  });
+                }
+              },
               onConversationBindingResolved: (handler) =>
                 registerConversationBindingResolvedHandler(record, handler),
               registerCommand: (command) => registerCommand(record, command),
@@ -2637,6 +2658,7 @@ export function createPluginRegistry(registryParams: PluginRegistryParams) {
 
     clearPluginCommandsForPlugin(pluginId);
     clearPluginInteractiveHandlersForPlugin(pluginId);
+    clearPluginInboundFallthroughHandlersForPlugin(pluginId);
     clearContextEnginesForOwner(`plugin:${pluginId}`);
 
     const hookRollbackEntries = pluginHookRollback.get(pluginId) ?? [];
