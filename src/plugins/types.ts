@@ -2030,6 +2030,17 @@ export type PluginInboundFallthroughEvent<TChannel extends string = string> = {
   chatId: string;
   /** Plain text body of the inbound message. */
   text: string;
+  /**
+   * Routing context populated by the channel adapter. Required when the
+   * handler intends to delegate to gateway-mediated services that key on
+   * the originating turn (e.g. `plugin.approval.request` for permission
+   * approvals). Optional so future channels with no agent/account binding
+   * can still register fallthrough handlers.
+   */
+  accountId?: string;
+  agentId?: string;
+  sessionKey?: string;
+  threadId?: string | number;
 };
 
 export type PluginInboundFallthroughResult =

@@ -961,6 +961,10 @@ export const dispatchTelegramMessage = async ({
             channel: "telegram",
             chatId: String(chatId),
             text: fallthroughText,
+            accountId: route.accountId,
+            agentId: route.agentId,
+            sessionKey: ctxPayload.SessionKey,
+            threadId: threadSpec.id,
           },
           onError: (err, registration) => {
             logVerbose(
