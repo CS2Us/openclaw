@@ -3,10 +3,11 @@ import type {
   PluginInboundFallthroughHandler,
   PluginInboundFallthroughResult,
 } from "openclaw/plugin-sdk/plugin-runtime";
+import { chatStateKey, getOrCreateChatState, updateChatStateAfterTurn } from "./chat-state.js";
 import {
   resolveDefaults,
   resolveProjectCwd,
-  runClaudeOnce,
+  runClaude,
   truncate,
   type ClaudeBridgeConfig,
 } from "./handler.js";
@@ -32,13 +33,19 @@ export function createClaudeBridgeFallthroughHandler(options: {
       return { handled: false };
     }
 
-    const result = await runClaudeOnce({
+    const key = chatStateKey(event.channel, event.chatId);
+    const state = getOrCreateChatState(key);
+
+    const result = await runClaude({
       bin: claudeBin,
       cwd: projectCwd,
       allowedTools,
       timeoutMs,
       prompt,
+      resumeSessionId: state.sessionId,
     });
+
+    updateChatStateAfterTurn(key, result.newSessionId);
 
     return { handled: true, reply: truncate(result.text, maxReplyChars) };
   };

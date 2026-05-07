@@ -1,8 +1,8 @@
-// Inbound fallthrough handler for claude-bridge. Spawns `claude -p <text>` in
-// the configured project cwd and returns the assistant's text. P1 keeps it
-// stateless (every turn is a fresh claude process). P2 will introduce session
-// continuity via stream-json + --resume; P3 will route tool permissions
-// through openclaw's ChannelApprovalHandler via an in-process MCP server.
+// Spawn `claude -p` and run a single turn. P2 uses stream-json so the bridge
+// can capture `session_id` (for `--resume <id>` continuity) and accumulate
+// assistant text incrementally. Permission decisions are still claude-local
+// (P3 will route them through openclaw's ChannelApprovalHandler via an
+// in-process MCP server).
 
 import { spawn } from "node:child_process";
 
@@ -23,6 +23,7 @@ const DEFAULTS = {
 
 export type RunClaudeResult = {
   text: string;
+  newSessionId: string | null;
   exitCode: number | null;
   signal: NodeJS.Signals | null;
   timedOut: boolean;
@@ -38,26 +39,51 @@ export function resolveProjectCwd(config: ClaudeBridgeConfig): string | undefine
   return fromConfig || undefined;
 }
 
-export function runClaudeOnce(params: {
+export type RunClaudeParams = {
   bin: string;
   cwd: string;
   allowedTools: string;
   timeoutMs: number;
   prompt: string;
-}): Promise<RunClaudeResult> {
+  /** When provided, spawn with `--resume <sessionId>` to continue an existing session. */
+  resumeSessionId?: string | null;
+};
+
+export function runClaude(params: RunClaudeParams): Promise<RunClaudeResult> {
   return new Promise((resolve, reject) => {
-    const child = spawn(params.bin, ["-p", params.prompt, "--allowed-tools", params.allowedTools], {
+    const args = [
+      "-p",
+      params.prompt,
+      "--output-format",
+      "stream-json",
+      "--verbose",
+      "--allowed-tools",
+      params.allowedTools,
+    ];
+    if (params.resumeSessionId) {
+      args.push("--resume", params.resumeSessionId);
+    }
+
+    const child = spawn(params.bin, args, {
       cwd: params.cwd,
       env: process.env,
       stdio: ["ignore", "pipe", "pipe"],
     });
 
-    let stdout = "";
+    const aggregator = createStreamJsonAggregator();
+    let stdoutBuffer = "";
     let stderr = "";
     let timedOut = false;
 
     child.stdout.on("data", (chunk) => {
-      stdout += chunk.toString("utf8");
+      stdoutBuffer += chunk.toString("utf8");
+      let newlineIdx = stdoutBuffer.indexOf("\n");
+      while (newlineIdx >= 0) {
+        const line = stdoutBuffer.slice(0, newlineIdx);
+        stdoutBuffer = stdoutBuffer.slice(newlineIdx + 1);
+        aggregator.feedLine(line);
+        newlineIdx = stdoutBuffer.indexOf("\n");
+      }
     });
     child.stderr.on("data", (chunk) => {
       stderr += chunk.toString("utf8");
@@ -76,26 +102,44 @@ export function runClaudeOnce(params: {
     });
     child.on("close", (exitCode, signal) => {
       clearTimeout(killer);
-      const text = formatReply({ stdout, stderr, exitCode, signal, timedOut });
-      resolve({ text, exitCode, signal, timedOut });
+      // Flush any unterminated trailing line.
+      if (stdoutBuffer.length > 0) {
+        aggregator.feedLine(stdoutBuffer);
+        stdoutBuffer = "";
+      }
+      const aggregated = aggregator.finalize();
+      const text = formatReply({
+        aggregatedText: aggregated.text,
+        stderr,
+        exitCode,
+        signal,
+        timedOut,
+      });
+      resolve({
+        text,
+        newSessionId: aggregated.sessionId,
+        exitCode,
+        signal,
+        timedOut,
+      });
     });
   });
 }
 
 function formatReply(r: {
-  stdout: string;
+  aggregatedText: string;
   stderr: string;
   exitCode: number | null;
   signal: NodeJS.Signals | null;
   timedOut: boolean;
 }): string {
   if (r.timedOut) {
-    return `claude-bridge: timed out\n---\n${r.stdout || r.stderr}`.trim();
+    return `claude-bridge: timed out\n---\n${r.aggregatedText || r.stderr}`.trim();
   }
   if (r.exitCode === 0) {
-    return r.stdout.trim() || "(claude returned no output)";
+    return r.aggregatedText.trim() || "(claude returned no output)";
   }
-  return `claude-bridge: exit ${r.exitCode}${r.signal ? ` (${r.signal})` : ""}\n---\n${r.stderr || r.stdout}`.trim();
+  return `claude-bridge: exit ${r.exitCode}${r.signal ? ` (${r.signal})` : ""}\n---\n${r.stderr || r.aggregatedText}`.trim();
 }
 
 export function truncate(text: string, max: number): string {
@@ -112,4 +156,77 @@ export function resolveDefaults(config: ClaudeBridgeConfig) {
     timeoutMs: config.timeoutMs ?? DEFAULTS.timeoutMs,
     maxReplyChars: config.maxReplyChars ?? DEFAULTS.maxReplyChars,
   };
+}
+
+// ---------------------------------------------------------------------------
+// stream-json line aggregator (pure, exported for unit tests)
+// ---------------------------------------------------------------------------
+
+type StreamJsonAggregator = {
+  feedLine(line: string): void;
+  finalize(): { text: string; sessionId: string | null };
+};
+
+export function createStreamJsonAggregator(): StreamJsonAggregator {
+  let sessionId: string | null = null;
+  const textChunks: string[] = [];
+
+  function feedLine(line: string): void {
+    const trimmed = line.trim();
+    if (trimmed.length === 0) {
+      return;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      // P2: drop malformed lines silently. P4 polish adds a fallback to text mode.
+      return;
+    }
+    if (!isObject(parsed)) {
+      return;
+    }
+    const type = parsed["type"];
+    if (type === "system") {
+      const sid = parsed["session_id"];
+      if (typeof sid === "string" && sid.length > 0 && sessionId === null) {
+        sessionId = sid;
+      }
+      return;
+    }
+    if (type === "assistant") {
+      const message = parsed["message"];
+      if (!isObject(message)) {
+        return;
+      }
+      const content = message["content"];
+      if (!Array.isArray(content)) {
+        return;
+      }
+      for (const block of content) {
+        if (!isObject(block)) {
+          continue;
+        }
+        if (block["type"] === "text") {
+          const t = block["text"];
+          if (typeof t === "string" && t.length > 0) {
+            textChunks.push(t);
+          }
+        }
+      }
+      return;
+    }
+    // `result`, `user` (tool_result echoes), and any other types are ignored
+    // for the purpose of plain-text reply construction in P2.
+  }
+
+  function finalize() {
+    return { text: textChunks.join(""), sessionId };
+  }
+
+  return { feedLine, finalize };
+}
+
+function isObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
 }
