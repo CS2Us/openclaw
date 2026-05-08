@@ -39,9 +39,16 @@ export function createTelegramRunnerOptions(cfg: OpenClawConfig): RunOptions<unk
       },
       // Suppress grammY getUpdates stack traces; we log concise errors ourselves.
       silent: true,
-      // Keep grammY retrying for a long outage window. If polling still
-      // stops, the outer monitor loop restarts it with backoff.
-      maxRetryTime: 60 * 60 * 1000,
+      // Disable grammY's internal retry loop: every error must surface to
+      // TelegramPollingSession's own catch in `#runPollingCycle` so retry,
+      // backoff, fail-fast, and channel-status decisions live in one place.
+      // With the previous 1h cap, transport-wrapped errors (those that lose
+      // the `error_code` property and skip throwIfUnrecoverable's 409
+      // short-circuit) silently looped for hours without surfacing —
+      // operators could not tell the duplicate-poller condition was hot.
+      // Setting maxRetryTime=0 forces grammy to throw on the very first
+      // error in its do/while; outer code is the single decision authority.
+      maxRetryTime: 0,
       retryInterval: "exponential",
     },
   };
