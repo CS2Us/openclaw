@@ -41,6 +41,18 @@ export function updateChatStateAfterTurn(key: ChatStateKey, sessionId: string | 
   state.lastUsedAt = Date.now();
 }
 
+/**
+ * Pin chat state to an externally-discovered session id (e.g. `/claude continue`
+ * adopting the cwd's most-recent local-CLI session). Differs from
+ * updateChatStateAfterTurn by being a deliberate user-initiated swap rather
+ * than a turn-end side effect.
+ */
+export function adoptChatStateSession(key: ChatStateKey, sessionId: string): void {
+  const state = getOrCreateChatState(key);
+  state.sessionId = sessionId;
+  state.lastUsedAt = Date.now();
+}
+
 export function clearAllChatStatesForTesting(): void {
   STATES.clear();
 }
