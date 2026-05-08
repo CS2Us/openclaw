@@ -11,6 +11,12 @@ import {
   truncate,
   type ClaudeBridgeConfig,
 } from "./handler.js";
+import {
+  buildPermHookEnv,
+  resolveGatewayPassword,
+  resolveGatewayUrl,
+  resolvePermHookScriptPath,
+} from "./perm-hook-spawn.js";
 
 export function createClaudeBridgeFallthroughHandler(options: {
   pluginConfig?: unknown;
@@ -36,6 +42,23 @@ export function createClaudeBridgeFallthroughHandler(options: {
     const key = chatStateKey(event.channel, event.chatId);
     const state = getOrCreateChatState(key);
 
+    const gatewayPassword = resolveGatewayPassword();
+    const permHookScriptPath = gatewayPassword ? resolvePermHookScriptPath() : null;
+    const permHookEnv = gatewayPassword
+      ? buildPermHookEnv({
+          gatewayUrl: resolveGatewayUrl(),
+          gatewayPassword,
+          routing: {
+            channel: event.channel,
+            chatId: event.chatId,
+            agentId: event.agentId,
+            sessionKey: event.sessionKey ?? key,
+            accountId: event.accountId,
+            threadId: event.threadId,
+          },
+        })
+      : null;
+
     const result = await runClaude({
       bin: claudeBin,
       cwd: projectCwd,
@@ -43,6 +66,8 @@ export function createClaudeBridgeFallthroughHandler(options: {
       timeoutMs,
       prompt,
       resumeSessionId: state.sessionId,
+      permHookScriptPath,
+      permHookEnv,
     });
 
     updateChatStateAfterTurn(key, result.newSessionId);

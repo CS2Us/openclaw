@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { createStreamJsonAggregator, truncate } from "./handler.js";
+import {
+  buildClaudeSpawnArgs,
+  buildClaudeSpawnEnv,
+  createStreamJsonAggregator,
+  truncate,
+} from "./handler.js";
 
 describe("createStreamJsonAggregator", () => {
   it("captures session_id from the first system event", () => {
@@ -98,5 +103,110 @@ describe("truncate", () => {
 
   it("appends a suffix indicating dropped chars when over the limit", () => {
     expect(truncate("abcdef", 3)).toBe("abc\n\n…(truncated, 3 chars dropped)");
+  });
+});
+
+describe("buildClaudeSpawnArgs", () => {
+  const baseParams = {
+    bin: "claude",
+    cwd: "/tmp/x",
+    allowedTools: "Read,Edit",
+    timeoutMs: 30_000,
+    prompt: "hello",
+  };
+
+  it("emits the minimal stream-json+verbose invocation", () => {
+    const args = buildClaudeSpawnArgs(baseParams);
+    expect(args).toEqual([
+      "-p",
+      "hello",
+      "--output-format",
+      "stream-json",
+      "--verbose",
+      "--allowed-tools",
+      "Read,Edit",
+    ]);
+  });
+
+  it("appends --resume <id> when resumeSessionId is set", () => {
+    const args = buildClaudeSpawnArgs({ ...baseParams, resumeSessionId: "sid-7" });
+    expect(args.slice(-2)).toEqual(["--resume", "sid-7"]);
+  });
+
+  it("does not append --resume when resumeSessionId is null/undefined/empty", () => {
+    expect(buildClaudeSpawnArgs({ ...baseParams, resumeSessionId: null })).not.toContain(
+      "--resume",
+    );
+    expect(buildClaudeSpawnArgs({ ...baseParams, resumeSessionId: undefined })).not.toContain(
+      "--resume",
+    );
+    expect(buildClaudeSpawnArgs({ ...baseParams, resumeSessionId: "" })).not.toContain("--resume");
+  });
+
+  it("emits a PreToolUse hook --settings + --include-hook-events when permHookScriptPath set", () => {
+    const args = buildClaudeSpawnArgs({
+      ...baseParams,
+      permHookScriptPath: "/abs/path/to/perm-hook.cjs",
+    });
+    expect(args).toContain("--settings");
+    expect(args).toContain("--include-hook-events");
+    const settingsIdx = args.indexOf("--settings");
+    const settingsJson = args[settingsIdx + 1];
+    expect(settingsJson).toBeDefined();
+    const parsed = JSON.parse(settingsJson!);
+    expect(parsed).toEqual({
+      hooks: {
+        PreToolUse: [
+          {
+            matcher: "*",
+            hooks: [{ type: "command", command: "/abs/path/to/perm-hook.cjs" }],
+          },
+        ],
+      },
+    });
+  });
+
+  it("does not add --settings when permHookScriptPath is empty", () => {
+    expect(buildClaudeSpawnArgs({ ...baseParams, permHookScriptPath: "" })).not.toContain(
+      "--settings",
+    );
+    expect(buildClaudeSpawnArgs({ ...baseParams, permHookScriptPath: null })).not.toContain(
+      "--settings",
+    );
+  });
+
+  it("composes resume + hook flags together in deterministic order", () => {
+    const args = buildClaudeSpawnArgs({
+      ...baseParams,
+      resumeSessionId: "sid-3",
+      permHookScriptPath: "/abs/perm.cjs",
+    });
+    const resumeIdx = args.indexOf("--resume");
+    const settingsIdx = args.indexOf("--settings");
+    expect(resumeIdx).toBeGreaterThan(0);
+    expect(settingsIdx).toBeGreaterThan(resumeIdx);
+  });
+});
+
+describe("buildClaudeSpawnEnv", () => {
+  it("returns the base env unchanged when permHookEnv is absent", () => {
+    const base = { FOO: "1", BAR: "2" };
+    expect(buildClaudeSpawnEnv({}, base)).toBe(base);
+    expect(buildClaudeSpawnEnv({ permHookEnv: null }, base)).toBe(base);
+  });
+
+  it("merges permHookEnv on top of the base env", () => {
+    const base = { FOO: "1", BAR: "2" };
+    const merged = buildClaudeSpawnEnv(
+      { permHookEnv: { OPENCLAW_GATEWAY_URL: "ws://x", BAR: "overridden" } },
+      base,
+    );
+    expect(merged).toEqual({
+      FOO: "1",
+      BAR: "overridden",
+      OPENCLAW_GATEWAY_URL: "ws://x",
+    });
+    // base must not be mutated
+    expect(base.BAR).toBe("2");
   });
 });

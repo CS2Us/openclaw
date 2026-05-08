@@ -11,6 +11,12 @@ import {
   truncate,
   type ClaudeBridgeConfig,
 } from "./handler.js";
+import {
+  buildPermHookEnv,
+  resolveGatewayPassword,
+  resolveGatewayUrl,
+  resolvePermHookScriptPath,
+} from "./perm-hook-spawn.js";
 
 export function createClaudeCommand(options: {
   pluginConfig?: unknown;
@@ -62,6 +68,23 @@ async function handleClaudeCommand(
 
   const { claudeBin, allowedTools, timeoutMs, maxReplyChars } = resolveDefaults(config);
 
+  const gatewayPassword = resolveGatewayPassword();
+  const permHookScriptPath = gatewayPassword ? resolvePermHookScriptPath() : null;
+  const permHookEnv = gatewayPassword
+    ? buildPermHookEnv({
+        gatewayUrl: resolveGatewayUrl(),
+        gatewayPassword,
+        routing: {
+          channel: ctx.channel,
+          chatId: stripChannelPrefix(ctx.channel, key),
+          agentId: undefined,
+          sessionKey: key,
+          accountId: ctx.accountId,
+          threadId: ctx.messageThreadId,
+        },
+      })
+    : null;
+
   const result = await runClaude({
     bin: claudeBin,
     cwd: projectCwd,
@@ -69,11 +92,18 @@ async function handleClaudeCommand(
     timeoutMs,
     prompt,
     resumeSessionId: null,
+    permHookScriptPath,
+    permHookEnv,
   });
 
   updateChatStateAfterTurn(key, result.newSessionId);
 
   return { text: truncate(result.text, maxReplyChars) };
+}
+
+function stripChannelPrefix(channel: string, key: string): string {
+  const prefix = `${channel}:`;
+  return key.startsWith(prefix) ? key.slice(prefix.length) : key;
 }
 
 function resolveChatKey(ctx: PluginCommandContext): string | undefined {

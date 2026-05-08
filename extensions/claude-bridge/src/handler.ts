@@ -47,26 +47,63 @@ export type RunClaudeParams = {
   prompt: string;
   /** When provided, spawn with `--resume <sessionId>` to continue an existing session. */
   resumeSessionId?: string | null;
+  /**
+   * Absolute path to the PreToolUse hook script. When set, claude is launched
+   * with `--settings` carrying a hook config that delegates every tool call to
+   * this script (see scripts/perm-hook.cjs). The hook reads gateway routing
+   * info from `permHookEnv` to forward decisions to openclaw approval pipeline.
+   */
+  permHookScriptPath?: string | null;
+  permHookEnv?: Record<string, string> | null;
 };
+
+export function buildClaudeSpawnArgs(params: RunClaudeParams): string[] {
+  const args = [
+    "-p",
+    params.prompt,
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--allowed-tools",
+    params.allowedTools,
+  ];
+  if (params.resumeSessionId) {
+    args.push("--resume", params.resumeSessionId);
+  }
+  if (params.permHookScriptPath) {
+    const settings = JSON.stringify({
+      hooks: {
+        PreToolUse: [
+          {
+            matcher: "*",
+            hooks: [{ type: "command", command: params.permHookScriptPath }],
+          },
+        ],
+      },
+    });
+    args.push("--settings", settings, "--include-hook-events");
+  }
+  return args;
+}
+
+export function buildClaudeSpawnEnv(
+  params: Pick<RunClaudeParams, "permHookEnv">,
+  baseEnv: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  if (!params.permHookEnv) {
+    return baseEnv;
+  }
+  return { ...baseEnv, ...params.permHookEnv };
+}
 
 export function runClaude(params: RunClaudeParams): Promise<RunClaudeResult> {
   return new Promise((resolve, reject) => {
-    const args = [
-      "-p",
-      params.prompt,
-      "--output-format",
-      "stream-json",
-      "--verbose",
-      "--allowed-tools",
-      params.allowedTools,
-    ];
-    if (params.resumeSessionId) {
-      args.push("--resume", params.resumeSessionId);
-    }
+    const args = buildClaudeSpawnArgs(params);
+    const env = buildClaudeSpawnEnv(params);
 
     const child = spawn(params.bin, args, {
       cwd: params.cwd,
-      env: process.env,
+      env,
       stdio: ["ignore", "pipe", "pipe"],
     });
 
