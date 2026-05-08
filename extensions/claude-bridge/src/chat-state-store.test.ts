@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   type ChatStateStore,
+  type PersistedChatStateRecord,
   isChatStateStoreDisabledForTesting,
   loadAllChatStates,
   persistChatState,
@@ -9,7 +10,7 @@ import {
   deleteChatStateInStore,
 } from "./chat-state-store.js";
 
-type Entry = { key: string; value: { sessionId: string | null; lastUsedAt: number } };
+type Entry = { key: string; value: PersistedChatStateRecord };
 
 function createFakeStore(initial: Entry[] = []) {
   const data = new Map<string, Entry["value"]>();

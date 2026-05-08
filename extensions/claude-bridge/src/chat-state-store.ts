@@ -19,9 +19,27 @@
 
 import type { PluginRuntime } from "openclaw/plugin-sdk/runtime-store";
 
-export type PersistedChatStateRecord = {
+export type PersistedTab = {
+  id: string;
   sessionId: string | null;
+  label: string;
+  createdAt: number;
   lastUsedAt: number;
+};
+
+/**
+ * Persisted shape. Forward-only fields are optional so legacy P5 records
+ * (`{ sessionId, lastUsedAt }`) parse without error and migrate at read-time
+ * in `chat-state.ts`'s `fromPersisted`. Once migrated, every subsequent write
+ * is in the v2 shape.
+ */
+export type PersistedChatStateRecord = {
+  tabs?: PersistedTab[];
+  activeTabId?: string | null;
+  lastUsedAt: number;
+  // Legacy v1 fallback — keep on the type so loaders don't trip up before
+  // migration. New writes never set this.
+  sessionId?: string | null;
 };
 
 const STORE_NAMESPACE = "claude-bridge.chat-state";

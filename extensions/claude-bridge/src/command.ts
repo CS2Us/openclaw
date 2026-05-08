@@ -5,8 +5,11 @@ import type {
 } from "openclaw/plugin-sdk/plugin-entry";
 import {
   adoptChatStateSession,
+  createNewTab,
+  getActiveTab,
   getOrCreateChatState,
   resetChatState,
+  seedActiveTabLabel,
   updateChatStateAfterTurn,
 } from "./chat-state.js";
 import {
@@ -22,7 +25,9 @@ import {
   resolveGatewayUrl,
   resolvePermHookScriptPath,
 } from "./perm-hook-spawn.js";
+import { gatherRecentLocalSessions } from "./recent-sessions.js";
 import { findMostRecentSession } from "./session-discovery.js";
+import { renderTabManager } from "./tab-manager-ui.js";
 
 export function createClaudeCommand(options: {
   pluginConfig?: unknown;
@@ -30,7 +35,7 @@ export function createClaudeCommand(options: {
   return {
     name: "claude",
     description:
-      "Reset the bridged Claude Code session for this chat. Plain DMs continue the same session; use this to start fresh. Pass an optional first message after the command.",
+      "Open the tab manager. Plain DMs go to the active tab. Sub-commands: session / continue.",
     acceptsArgs: true,
     requireAuth: true,
     handler: (ctx) => handleClaudeCommand(ctx, options),
@@ -51,33 +56,109 @@ async function handleClaudeCommand(
   const args = ctx.args?.trim() ?? "";
   const [first] = args.split(/\s+/);
 
-  // Sub-commands `/claude session` and `/claude continue` operate on chat
-  // state without resetting; both expose the bridge↔local-CLI session bridge.
+  // Sub-commands operate on the active tab.
   if (first === "session") {
     return handleSessionInfo(key);
   }
   if (first === "continue") {
     return handleContinue(key, config);
   }
+  if (first === "new") {
+    return handleNewTab(key);
+  }
 
-  // §3.2 trigger table: `/claude` (no args) and `/claude <text>` both reset.
-  // With no args we just reply "session reset"; with args we additionally
-  // spawn a fresh claude turn (no --resume) so the args become the first
-  // message of the new session.
-  resetChatState(key);
-
-  const prompt = args;
-  if (!prompt) {
+  // `/claude` (no args): show tab manager UI. The browser-tab metaphor means
+  // "I want to see / manage my tabs" rather than "wipe everything"; explicit
+  // reset lives on a button inside the manager.
+  if (!args) {
+    const state = getOrCreateChatState(key);
+    const projectCwd = resolveProjectCwd(config);
+    const recentLocalSessions = projectCwd
+      ? gatherRecentLocalSessions({ state, cwd: projectCwd })
+      : [];
+    const ui = renderTabManager(state, { recentLocalSessions });
     return {
-      text:
-        "新会话已开启。直接给 bot 发消息即可继续，无需每次都打 /claude。\n" +
-        "再次发送 /claude 会重置会话。\n\n" +
-        "其他子命令：\n" +
-        "  /claude session  — 显示当前 session id（本地可用 `claude --resume <id>` 接续）\n" +
-        "  /claude continue — 接续 cwd 里最近的本地 claude session",
+      text: ui.text,
+      interactive: ui.interactive,
     };
   }
 
+  // `/claude <text>`: send to active tab, auto-creating one if none exists.
+  // This replaces the v1 "reset + send first message" semantics; explicit
+  // reset is now the [🗑 重置全部] button in the tab manager.
+  const state = getOrCreateChatState(key);
+  if (!getActiveTab(state)) {
+    createNewTab(key);
+  }
+  return spawnClaudeForActiveTab({ key, prompt: args, config, ctx });
+}
+
+function handleNewTab(key: string): PluginCommandResult {
+  const tab = createNewTab(key);
+  return {
+    text: `已起新 tab：**${tab.label}**。直接发消息开始对话；再发 /claude 可看 / 切换全部 tab。`,
+  };
+}
+
+function handleSessionInfo(key: string): PluginCommandResult {
+  const state = getOrCreateChatState(key);
+  const active = getActiveTab(state);
+  if (!active || !active.sessionId) {
+    return {
+      text: "当前活跃 tab 还没有 claude session。直接发消息或 `/claude continue` 接续本地 session 即可。",
+    };
+  }
+  return {
+    text:
+      `活跃 tab：**${active.label}**\n` +
+      `当前 session: \`${active.sessionId}\`\n` +
+      `本地继续：\`claude --resume ${active.sessionId}\`（在 OPENCLAW_CLAUDE_BRIDGE_CWD 内跑）`,
+  };
+}
+
+function handleContinue(key: string, config: ClaudeBridgeConfig): PluginCommandResult {
+  const projectCwd = resolveProjectCwd(config);
+  if (!projectCwd) {
+    return {
+      text:
+        "claude-bridge: projectCwd is not configured.\n" +
+        "Set it via plugin config (`projectCwd`) or env `OPENCLAW_CLAUDE_BRIDGE_CWD`.",
+    };
+  }
+  const state = getOrCreateChatState(key);
+  const exclude = new Set<string>();
+  for (const t of state.tabs) {
+    if (t.sessionId) {
+      exclude.add(t.sessionId);
+    }
+  }
+  const recent = findMostRecentSession({ cwd: projectCwd, excludeSessionIds: exclude });
+  if (!recent) {
+    return {
+      text:
+        "本地 cwd 没有可接续的 claude session（或都已被本 chat 的 tab 占用）。\n" +
+        "在终端里跑一次 `claude` 起一个，再回来 `/claude continue`。",
+    };
+  }
+  adoptChatStateSession(key, recent.sessionId);
+  const ageMin = Math.max(1, Math.round((Date.now() - recent.mtimeMs) / 60_000));
+  const previewLine = recent.preview ? `\n最近用户消息：${recent.preview}` : "";
+  const active = getActiveTab(getOrCreateChatState(key));
+  return {
+    text:
+      `活跃 tab **${active?.label ?? "?"}** 已接续本地最近 session：\`${recent.sessionId}\`\n` +
+      `${recent.eventCount} 条事件，距今 ${ageMin} 分钟${previewLine}\n` +
+      `下一条消息会接到这个 session 继续。`,
+  };
+}
+
+async function spawnClaudeForActiveTab(params: {
+  key: string;
+  prompt: string;
+  config: ClaudeBridgeConfig;
+  ctx: PluginCommandContext;
+}): Promise<PluginCommandResult> {
+  const { key, prompt, config, ctx } = params;
   const projectCwd = resolveProjectCwd(config);
   if (!projectCwd) {
     return {
@@ -88,6 +169,11 @@ async function handleClaudeCommand(
   }
 
   const { claudeBin, allowedTools, timeoutMs, maxReplyChars } = resolveDefaults(config);
+
+  const state = getOrCreateChatState(key);
+  // Lock the label at turn-start so back-to-back /claude commands don't race.
+  seedActiveTabLabel(key, prompt);
+  const active = getActiveTab(state);
 
   const gatewayPassword = resolveGatewayPassword();
   const permHookScriptPath = gatewayPassword ? resolvePermHookScriptPath() : null;
@@ -112,7 +198,7 @@ async function handleClaudeCommand(
     allowedTools,
     timeoutMs,
     prompt,
-    resumeSessionId: null,
+    resumeSessionId: active?.sessionId ?? null,
     permHookScriptPath,
     permHookEnv,
   });
@@ -122,64 +208,15 @@ async function handleClaudeCommand(
   return { text: truncate(result.text, maxReplyChars) };
 }
 
-function handleSessionInfo(key: string): PluginCommandResult {
-  const state = getOrCreateChatState(key);
-  if (!state.sessionId) {
-    return {
-      text: "当前 chat 还没有活跃 claude session。直接发消息或 `/claude continue` 接续本地 session 即可。",
-    };
-  }
-  return {
-    text:
-      `当前 session: \`${state.sessionId}\`\n` +
-      `本地继续：\`claude --resume ${state.sessionId}\`（在 OPENCLAW_CLAUDE_BRIDGE_CWD 内跑）`,
-  };
-}
-
-function handleContinue(key: string, config: ClaudeBridgeConfig): PluginCommandResult {
-  const projectCwd = resolveProjectCwd(config);
-  if (!projectCwd) {
-    return {
-      text:
-        "claude-bridge: projectCwd is not configured.\n" +
-        "Set it via plugin config (`projectCwd`) or env `OPENCLAW_CLAUDE_BRIDGE_CWD`.",
-    };
-  }
-  const state = getOrCreateChatState(key);
-  const exclude = new Set<string>();
-  if (state.sessionId) {
-    exclude.add(state.sessionId);
-  }
-  const recent = findMostRecentSession({ cwd: projectCwd, excludeSessionIds: exclude });
-  if (!recent) {
-    return {
-      text:
-        "本地 cwd 没有可接续的 claude session（或仅剩当前 chat 自己的）。\n" +
-        "在终端里跑一次 `claude` 起一个，再回来 `/claude continue`。",
-    };
-  }
-  adoptChatStateSession(key, recent.sessionId);
-  const ageMin = Math.max(1, Math.round((Date.now() - recent.mtimeMs) / 60_000));
-  const previewLine = recent.preview ? `\n最近用户消息：${recent.preview}` : "";
-  return {
-    text:
-      `已接续本地最近 session：\`${recent.sessionId}\`\n` +
-      `${recent.eventCount} 条事件，距今 ${ageMin} 分钟${previewLine}\n` +
-      `下一条消息会接到这个 session 继续。`,
-  };
-}
-
 function stripChannelPrefix(channel: string, key: string): string {
   const prefix = `${channel}:`;
   return key.startsWith(prefix) ? key.slice(prefix.length) : key;
 }
 
 function resolveChatKey(ctx: PluginCommandContext): string | undefined {
-  // For telegram, `ctx.to` is `${channel}:${chatId}` (see
-  // extensions/telegram/src/bot-native-commands.ts), which matches the shape
-  // produced by chatStateKey() on the fallthrough side. Fall back to the
-  // sender id if the channel adapter ever omits `to` so /claude is still
-  // usable, even though state may not align with the fallthrough handler's
-  // keyspace in that case.
   return ctx.to ?? ctx.from ?? ctx.senderId;
 }
+
+// Re-exports kept so other modules (tests, fallthrough handler) don't have to
+// import side-effect symbols from chat-state directly.
+export { resetChatState };

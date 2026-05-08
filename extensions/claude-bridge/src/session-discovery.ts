@@ -73,35 +73,68 @@ export function readSessionInfo(jsonlPath: string): {
     return { eventCount: 0, lastEventMs: null, preview: null };
   }
   const lines = raw.split("\n").filter((line) => line.length > 0);
-  let lastEventMs: number | null = null;
+
+  // Preview = the *first* substantive user prompt (not the last). The first
+  // message identifies what the session is "about" and is stable across
+  // continuations. We strip IDE / slash-command wrapper tags
+  // (`<ide_opened_file>…</ide_opened_file>`, `<command-message>…</command-message>`)
+  // so the preview shows the user's actual text.
   let preview: string | null = null;
-  for (let i = lines.length - 1; i >= 0; i--) {
+  for (let i = 0; i < lines.length; i++) {
     let parsed: unknown;
     try {
-      parsed = JSON.parse(lines[i]!);
+      parsed = JSON.parse(lines[i] ?? "");
     } catch {
       continue;
     }
-    if (!isObject(parsed)) {
+    if (!isObject(parsed) || parsed["type"] !== "user") {
       continue;
     }
-    if (lastEventMs === null && typeof parsed["timestamp"] === "string") {
-      const t = Date.parse(parsed["timestamp"]);
-      if (Number.isFinite(t)) {
-        lastEventMs = t;
-      }
+    const text = stripWrapperTags(extractUserText(parsed)).trim();
+    if (!text) {
+      continue;
     }
-    if (preview === null && parsed["type"] === "user") {
-      const text = extractUserText(parsed);
-      if (text) {
-        preview = text.length > 80 ? `${text.slice(0, 80)}…` : text;
+    preview = text.length > 80 ? `${text.slice(0, 80)}…` : text;
+    break;
+  }
+
+  // lastEventMs: the most recent parseable timestamp on any event.
+  let lastEventMs: number | null = null;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    try {
+      const parsed = JSON.parse(lines[i] ?? "");
+      if (isObject(parsed) && typeof parsed["timestamp"] === "string") {
+        const t = Date.parse(parsed["timestamp"]);
+        if (Number.isFinite(t)) {
+          lastEventMs = t;
+          break;
+        }
       }
-    }
-    if (lastEventMs !== null && preview !== null) {
-      break;
+    } catch {
+      // skip bad lines
     }
   }
+
   return { eventCount: lines.length, lastEventMs, preview };
+}
+
+/**
+ * Drop one or more leading `<tag>...</tag>` wrappers that IDE / Claude Code
+ * inject before the user's actual text. Keeps simple `<` characters that
+ * appear inside a real user prompt (e.g. "use `<` for ...") untouched, since
+ * those wouldn't match the strict `<tag>` pattern.
+ */
+function stripWrapperTags(text: string): string {
+  let out = text;
+  // Iterate so multiple stacked wrappers (rare but possible) all get stripped.
+  for (let i = 0; i < 4; i++) {
+    const m = /^\s*<([a-zA-Z][\w-]*)\b[^>]*>[\s\S]*?<\/\1>\s*/m.exec(out);
+    if (!m) {
+      break;
+    }
+    out = out.slice(m[0].length);
+  }
+  return out;
 }
 
 export function findMostRecentSession(opts: {

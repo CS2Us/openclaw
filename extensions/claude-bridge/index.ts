@@ -3,6 +3,7 @@ import { setClaudeBridgeRuntime } from "./src/chat-state-store.js";
 import { hydrateChatStatesFromStore } from "./src/chat-state.js";
 import { createClaudeCommand } from "./src/command.js";
 import { createClaudeBridgeFallthroughHandler } from "./src/fallthrough.js";
+import { createTabManagerInteractiveHandler } from "./src/interactive.js";
 
 export default definePluginEntry({
   id: "claude-bridge",
@@ -25,5 +26,8 @@ export default definePluginEntry({
       channel: "telegram",
       handler: createClaudeBridgeFallthroughHandler({ pluginConfig: api.pluginConfig }),
     });
+    api.registerInteractiveHandler(
+      createTabManagerInteractiveHandler({ pluginConfig: api.pluginConfig }),
+    );
   },
 });

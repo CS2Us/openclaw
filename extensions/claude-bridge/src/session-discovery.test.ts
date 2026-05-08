@@ -68,7 +68,7 @@ describe("listSessionFiles", () => {
 });
 
 describe("readSessionInfo", () => {
-  it("counts events and finds last timestamp + last user preview", () => {
+  it("counts events, picks first user prompt for preview, and tracks last timestamp", () => {
     const file = writeJsonl(tmpHome, cwd, "s1", [
       { type: "user", message: { content: "first" }, timestamp: "2026-05-01T00:00:00Z" },
       {
@@ -85,7 +85,34 @@ describe("readSessionInfo", () => {
     const info = readSessionInfo(file);
     expect(info.eventCount).toBe(3);
     expect(info.lastEventMs).toBe(Date.parse("2026-05-01T00:00:10Z"));
-    expect(info.preview).toBe("second message");
+    // Preview = first user prompt — stable identifier across continuations.
+    expect(info.preview).toBe("first");
+  });
+
+  it("strips IDE / command-message wrappers from the preview", () => {
+    const file = writeJsonl(tmpHome, cwd, "wrap", [
+      {
+        type: "user",
+        message: {
+          content:
+            "<ide_opened_file>The user opened the file /x</ide_opened_file>relay 是怎么管理会话的？",
+        },
+      },
+    ]);
+    expect(readSessionInfo(file).preview).toBe("relay 是怎么管理会话的？");
+  });
+
+  it("skips empty wrapper-only user messages and falls through to next", () => {
+    const file = writeJsonl(tmpHome, cwd, "wrapempty", [
+      {
+        type: "user",
+        message: {
+          content: "<command-message>checkpoint</command-message>",
+        },
+      },
+      { type: "user", message: { content: [{ type: "text", text: "actual prompt" }] } },
+    ]);
+    expect(readSessionInfo(file).preview).toBe("actual prompt");
   });
 
   it("truncates long previews at 80 chars with ellipsis", () => {

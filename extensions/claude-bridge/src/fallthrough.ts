@@ -3,7 +3,14 @@ import type {
   PluginInboundFallthroughHandler,
   PluginInboundFallthroughResult,
 } from "openclaw/plugin-sdk/plugin-runtime";
-import { chatStateKey, getOrCreateChatState, updateChatStateAfterTurn } from "./chat-state.js";
+import {
+  chatStateKey,
+  createNewTab,
+  getActiveTab,
+  getOrCreateChatState,
+  seedActiveTabLabel,
+  updateChatStateAfterTurn,
+} from "./chat-state.js";
 import {
   resolveDefaults,
   resolveProjectCwd,
@@ -42,6 +49,17 @@ export function createClaudeBridgeFallthroughHandler(options: {
     const key = chatStateKey(event.channel, event.chatId);
     const state = getOrCreateChatState(key);
 
+    // Plain DM goes to the active tab. If no tab exists yet (fresh chat or
+    // post-reset), auto-create one so the user doesn't have to /claude first.
+    if (!getActiveTab(state)) {
+      createNewTab(key);
+    }
+    // Lock the label to *this* prompt before claude even spawns — turn-start
+    // ordering wins so two rapid messages don't fight over the label at
+    // turn-end (whichever claude turn returns first would otherwise win).
+    seedActiveTabLabel(key, prompt);
+    const active = getActiveTab(state);
+
     const gatewayPassword = resolveGatewayPassword();
     const permHookScriptPath = gatewayPassword ? resolvePermHookScriptPath() : null;
     const permHookEnv = gatewayPassword
@@ -65,7 +83,7 @@ export function createClaudeBridgeFallthroughHandler(options: {
       allowedTools,
       timeoutMs,
       prompt,
-      resumeSessionId: state.sessionId,
+      resumeSessionId: active?.sessionId ?? null,
       permHookScriptPath,
       permHookEnv,
     });
