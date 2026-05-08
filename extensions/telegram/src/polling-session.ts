@@ -28,6 +28,14 @@ const MIN_POLL_STALL_THRESHOLD_MS = 30_000;
 const MAX_POLL_STALL_THRESHOLD_MS = 600_000;
 const POLL_WATCHDOG_INTERVAL_MS = 30_000;
 const POLL_STOP_GRACE_MS = 15_000;
+// Cap consecutive 409 retries: another active poller is not a transient
+// failure that backoff can heal — every retry will keep losing the race
+// against the duplicate. After this many consecutive conflicts, fail fast and
+// stop polling so operators see a loud `lastError` instead of an infinite
+// silent backoff loop.
+const DEFAULT_CONFLICT_MAX_ATTEMPTS = 3;
+const MIN_CONFLICT_MAX_ATTEMPTS = 1;
+const MAX_CONFLICT_MAX_ATTEMPTS = 100;
 const TELEGRAM_POLLING_CLIENT_TIMEOUT_FLOOR_SECONDS = Math.ceil(
   TELEGRAM_GET_UPDATES_REQUEST_TIMEOUT_MS / 1000,
 );
@@ -61,6 +69,16 @@ const resolvePollingStallThresholdMs = (value: number | undefined): number => {
   );
 };
 
+const resolveConflictMaxAttempts = (value: number | undefined): number => {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return DEFAULT_CONFLICT_MAX_ATTEMPTS;
+  }
+  return Math.min(
+    MAX_CONFLICT_MAX_ATTEMPTS,
+    Math.max(MIN_CONFLICT_MAX_ATTEMPTS, Math.floor(value)),
+  );
+};
+
 type TelegramPollingSessionOpts = {
   token: string;
   config: Parameters<typeof createTelegramBot>[0]["config"];
@@ -79,6 +97,12 @@ type TelegramPollingSessionOpts = {
   createTelegramTransport?: () => TelegramTransport;
   /** Stall detection threshold in ms. Defaults to 120_000 (2 min). */
   stallThresholdMs?: number;
+  /**
+   * Maximum consecutive 409 getUpdates conflicts before the polling session
+   * fails fast and exits. Defaults to 3 — backoff cannot heal a duplicate
+   * poller, so retrying forever just hides the operator-action requirement.
+   */
+  conflictMaxAttempts?: number;
   setStatus?: (patch: Omit<ChannelAccountSnapshot, "accountId">) => void;
 };
 
@@ -91,6 +115,8 @@ export class TelegramPollingSession {
   #transportState: TelegramPollingTransportState;
   #status: ReturnType<typeof createTelegramPollingStatusPublisher>;
   #stallThresholdMs: number;
+  #conflictMaxAttempts: number;
+  #consecutive409Count = 0;
 
   constructor(private readonly opts: TelegramPollingSessionOpts) {
     this.#transportState = new TelegramPollingTransportState({
@@ -100,6 +126,7 @@ export class TelegramPollingSession {
     });
     this.#status = createTelegramPollingStatusPublisher(opts.setStatus);
     this.#stallThresholdMs = resolvePollingStallThresholdMs(opts.stallThresholdMs);
+    this.#conflictMaxAttempts = resolveConflictMaxAttempts(opts.conflictMaxAttempts);
   }
 
   get activeRunner() {
@@ -253,6 +280,10 @@ export class TelegramPollingSession {
       try {
         const result = await prev(method, payload, signal);
         liveness.noteGetUpdatesSuccess(result);
+        // Any successful getUpdates clears the consecutive-conflict counter:
+        // the duplicate poller stepped aside (or never existed). Without this
+        // reset a single transient 409 would slowly accumulate toward fail-fast.
+        this.#consecutive409Count = 0;
         return result;
       } catch (err) {
         liveness.noteGetUpdatesError(err);
@@ -356,6 +387,20 @@ export class TelegramPollingSession {
       const isConflict = isGetUpdatesConflict(err);
       if (isConflict) {
         this.#webhookCleared = false;
+        this.#consecutive409Count += 1;
+        if (this.#consecutive409Count >= this.#conflictMaxAttempts) {
+          // Fail fast: backoff cannot heal a duplicate poller. Surface the
+          // condition via channel status so operators see a loud `lastError`
+          // instead of an infinite silent retry loop.
+          const errMsg = formatErrorMessage(err);
+          const fatalMessage =
+            `${this.#consecutive409Count} consecutive getUpdates 409 conflicts; ` +
+            `another instance is using this bot token. Stopping channel polling. ` +
+            `Action: stop the duplicate poller, then restart this gateway.`;
+          this.opts.log(`[telegram] FATAL: ${fatalMessage} (last err: ${errMsg})`);
+          this.#status.notePollingFatalConflict(fatalMessage);
+          return "exit";
+        }
       }
       const isRecoverable = isRecoverableTelegramNetworkError(err, { context: "polling" });
       // Mark transport dirty on 409 conflict as well as recoverable network

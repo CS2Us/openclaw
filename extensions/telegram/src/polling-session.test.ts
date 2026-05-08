@@ -142,6 +142,7 @@ function createPollingSession(params: {
   telegramTransport?: ReturnType<typeof makeTelegramTransport>;
   createTelegramTransport?: () => ReturnType<typeof makeTelegramTransport>;
   stallThresholdMs?: number;
+  conflictMaxAttempts?: number;
   setStatus?: (patch: Omit<ChannelAccountSnapshot, "accountId">) => void;
 }) {
   return new TelegramPollingSession({
@@ -157,6 +158,7 @@ function createPollingSession(params: {
     log: params.log ?? (() => undefined),
     telegramTransport: params.telegramTransport,
     stallThresholdMs: params.stallThresholdMs,
+    conflictMaxAttempts: params.conflictMaxAttempts,
     setStatus: params.setStatus,
     ...(params.createTelegramTransport
       ? { createTelegramTransport: params.createTelegramTransport }
@@ -1049,6 +1051,98 @@ describe("TelegramPollingSession", () => {
 
     expect(log).toHaveBeenCalledWith(
       expect.stringContaining("Another OpenClaw gateway, script, or Telegram poller"),
+    );
+  });
+
+  it("fails fast after N consecutive 409 conflicts (default 3)", async () => {
+    // A duplicate poller is not a transient network failure — backoff cannot
+    // heal it. The polling session must stop after a small N of consecutive
+    // 409s and surface a loud `lastError` so operators see the action item.
+    const abort = new AbortController();
+    const log = vi.fn();
+    const setStatus = vi.fn();
+    const conflictError = Object.assign(
+      new Error("Conflict: terminated by other getUpdates request"),
+      { error_code: 409, method: "getUpdates" },
+    );
+    // Provide 4 bots so we never starve if the session somehow runs more
+    // cycles than expected.
+    createTelegramBotMock
+      .mockReturnValueOnce(makeBot())
+      .mockReturnValueOnce(makeBot())
+      .mockReturnValueOnce(makeBot())
+      .mockReturnValueOnce(makeBot());
+    isRecoverableTelegramNetworkErrorMock.mockReturnValue(false);
+
+    let cyclesRun = 0;
+    runMock.mockImplementation(() => {
+      cyclesRun += 1;
+      return {
+        task: async () => {
+          throw conflictError;
+        },
+        stop: vi.fn(async () => undefined),
+        isRunning: () => false,
+      };
+    });
+
+    const session = createPollingSession({
+      abortSignal: abort.signal,
+      log,
+      setStatus,
+    });
+
+    await session.runUntilAbort();
+
+    expect(cyclesRun).toBe(3);
+    expect(abort.signal.aborted).toBe(false);
+    expect(log).toHaveBeenCalledWith(
+      expect.stringContaining("FATAL: 3 consecutive getUpdates 409 conflicts"),
+    );
+    const fatalStatusCall = setStatus.mock.calls.find((args) => args[0]?.lastError);
+    expect(fatalStatusCall?.[0]).toMatchObject({
+      mode: "polling",
+      connected: false,
+      lastError: expect.stringContaining("3 consecutive getUpdates 409 conflicts"),
+    });
+  });
+
+  it("respects custom conflictMaxAttempts setting", async () => {
+    const abort = new AbortController();
+    const log = vi.fn();
+    const conflictError = Object.assign(
+      new Error("Conflict: terminated by other getUpdates request"),
+      { error_code: 409, method: "getUpdates" },
+    );
+    createTelegramBotMock
+      .mockReturnValueOnce(makeBot())
+      .mockReturnValueOnce(makeBot())
+      .mockReturnValueOnce(makeBot());
+    isRecoverableTelegramNetworkErrorMock.mockReturnValue(false);
+
+    let cyclesRun = 0;
+    runMock.mockImplementation(() => {
+      cyclesRun += 1;
+      return {
+        task: async () => {
+          throw conflictError;
+        },
+        stop: vi.fn(async () => undefined),
+        isRunning: () => false,
+      };
+    });
+
+    const session = createPollingSession({
+      abortSignal: abort.signal,
+      log,
+      conflictMaxAttempts: 2,
+    });
+
+    await session.runUntilAbort();
+
+    expect(cyclesRun).toBe(2);
+    expect(log).toHaveBeenCalledWith(
+      expect.stringContaining("FATAL: 2 consecutive getUpdates 409 conflicts"),
     );
   });
 
