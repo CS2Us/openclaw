@@ -9,6 +9,14 @@
   "openclaw": {
     "extensions": [
       "./index.ts"
-    ]
+    ],
+    "build": {
+      "staticAssets": [
+        {
+          "source": "scripts/perm-hook.cjs",
+          "output": "scripts/perm-hook.cjs"
+        }
+      ]
+    }
   }
 }

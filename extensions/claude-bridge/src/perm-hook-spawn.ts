@@ -5,6 +5,8 @@
 // - Builds the env that the hook child reads to forward routing context to
 //   plugin.approval.request. See spec §3.6 for the env contract.
 
+import { existsSync } from "node:fs";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 export type PermHookRoutingContext = {
@@ -16,9 +18,34 @@ export type PermHookRoutingContext = {
   threadId?: string | number;
 };
 
-export function resolvePermHookScriptPath(): string {
-  // src/perm-hook-spawn.ts → ../scripts/perm-hook.cjs
-  return fileURLToPath(new URL("../scripts/perm-hook.cjs", import.meta.url));
+/**
+ * Locate the runtime hook script. The lookup spans both source-tree (tsx /
+ * dev runs) and dist-bundle (production) layouts because openclaw's bundler
+ * collapses extension chunks: `import.meta.url` at runtime is no longer a
+ * stable proxy for "this plugin's install dir". We probe candidate paths
+ * walking up from `import.meta.url` and return the first one that exists.
+ */
+export function resolvePermHookScriptPath(): string | undefined {
+  const here = fileURLToPath(import.meta.url);
+  const dir = path.dirname(here);
+  const candidates = [
+    // Source-tree layout: extensions/claude-bridge/src/* → ../scripts/.
+    path.join(dir, "..", "scripts", "perm-hook.cjs"),
+    // Bundled dist where staticAssets restore the canonical plugin folder
+    // (extensions/<plugin>/scripts/...). Look up two levels then descend
+    // through `claude-bridge/scripts/`.
+    path.join(dir, "..", "claude-bridge", "scripts", "perm-hook.cjs"),
+    // Same recovery one level higher (when bundler nests deeper).
+    path.join(dir, "..", "..", "claude-bridge", "scripts", "perm-hook.cjs"),
+    // dist root recovery: <cwd>/dist/extensions/claude-bridge/scripts/...
+    path.join(dir, "..", "..", "..", "extensions", "claude-bridge", "scripts", "perm-hook.cjs"),
+  ];
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return undefined;
 }
 
 export function buildPermHookEnv(params: {
