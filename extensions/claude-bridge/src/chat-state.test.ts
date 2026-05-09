@@ -16,6 +16,7 @@ import {
   hydrateChatStatesFromStore,
   importSessionAsTab,
   isAutoLabel,
+  MAX_TABS,
   resetChatState,
   seedActiveTabLabel,
   switchActiveTab,
@@ -114,6 +115,109 @@ describe("createNewTab", () => {
         .tabs.map((t) => t.id)
         .toSorted(),
     ).toEqual(["t1", "t2"]);
+  });
+});
+
+describe("MAX_TABS cap + LRU eviction", () => {
+  // Eviction recycles tab ids (same as closeTab: see "never recycles" test
+  // above). To identify which tab survived, we tag each pre-fill tab with a
+  // unique label and assert by label after eviction.
+  function fillToCapWithLabels(key: string): string[] {
+    const labels: string[] = [];
+    for (let i = 1; i <= MAX_TABS; i++) {
+      const lbl = `Pre-${i}`;
+      labels.push(lbl);
+      createNewTab(key, { label: lbl });
+    }
+    return labels;
+  }
+
+  it("createNewTab evicts the least-recently-used non-active tab when at cap", () => {
+    const key = "telegram:1";
+    fillToCapWithLabels(key);
+    const state = getOrCreateChatState(key);
+
+    // Spread lastUsedAt so the first-created tab (Pre-1) is global LRU.
+    // Last-created (Pre-MAX) is active.
+    const now = Date.now();
+    state.tabs.forEach((t, i) => {
+      t.lastUsedAt = now + i;
+    });
+
+    expect(state.tabs.length).toBe(MAX_TABS);
+
+    const newTab = createNewTab(key, { label: "Fresh" });
+    expect(state.tabs.length).toBe(MAX_TABS);
+    const labels = state.tabs.map((t) => t.label);
+    expect(labels).not.toContain("Pre-1"); // LRU evicted
+    expect(labels).toContain("Pre-2"); // others survive
+    expect(labels).toContain("Fresh"); // new tab present
+    expect(state.activeTabId).toBe(newTab.id);
+  });
+
+  it("active tab is protected from eviction even when it's the oldest", () => {
+    const key = "telegram:1";
+    const labels = fillToCapWithLabels(key);
+    const state = getOrCreateChatState(key);
+    // Switch active to the first-created tab (Pre-1).
+    const pre1 = state.tabs.find((t) => t.label === "Pre-1");
+    if (!pre1) {
+      throw new Error("setup");
+    }
+    switchActiveTab(key, pre1.id);
+
+    // Pre-1 is active; bump non-active lastUsedAt above so Pre-1 is global LRU.
+    const now = Date.now();
+    state.tabs.forEach((t) => {
+      t.lastUsedAt = t.id === pre1.id ? now : now + 1000;
+    });
+
+    createNewTab(key, { label: "Fresh" });
+    const surviving = state.tabs.map((t) => t.label);
+    expect(surviving).toContain("Pre-1"); // active protected
+    expect(surviving).not.toContain("Pre-2"); // next-oldest non-active evicted
+    expect(surviving).toContain("Fresh");
+    // sanity: 3..MAX still survive
+    for (let i = 3; i <= labels.length; i++) {
+      expect(surviving).toContain(`Pre-${i}`);
+    }
+  });
+
+  it("importSessionAsTab respects the cap and LRU-evicts on overflow", () => {
+    const key = "telegram:1";
+    fillToCapWithLabels(key);
+    const state = getOrCreateChatState(key);
+    const now = Date.now();
+    state.tabs.forEach((t, i) => {
+      t.lastUsedAt = now + i;
+    });
+
+    const imported = importSessionAsTab(key, "imported-sid", { label: "Imp" });
+    expect(state.tabs.length).toBe(MAX_TABS);
+    const labels = state.tabs.map((t) => t.label);
+    expect(labels).not.toContain("Pre-1");
+    expect(labels).toContain("Imp");
+    expect(state.activeTabId).toBe(imported.id);
+    expect(imported.sessionId).toBe("imported-sid");
+  });
+
+  it("re-importing an existing sessionId is idempotent and does NOT evict", () => {
+    const key = "telegram:1";
+    importSessionAsTab(key, "shared-sid", { label: "Shared" });
+    while (getOrCreateChatState(key).tabs.length < MAX_TABS) {
+      createNewTab(key);
+    }
+    const labelsBefore = getOrCreateChatState(key)
+      .tabs.map((t) => t.label)
+      .toSorted();
+
+    importSessionAsTab(key, "shared-sid");
+    const labelsAfter = getOrCreateChatState(key)
+      .tabs.map((t) => t.label)
+      .toSorted();
+    expect(labelsAfter).toEqual(labelsBefore);
+    // active should now point to the Shared tab
+    expect(getActiveTab(getOrCreateChatState(key))?.label).toBe("Shared");
   });
 });
 

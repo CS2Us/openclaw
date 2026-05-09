@@ -104,9 +104,8 @@ export function renderTabManager(
     state.tabs.forEach((t, idx) => {
       const active = t.id === state.activeTabId;
       const code = idx + 1;
-      const sid = t.sessionId ? `\`${t.sessionId.slice(0, 8)}\`` : "未起 session";
       const marker = active ? `${ACTIVE_DOT}${code}` : ` ${code}`;
-      lines.push(`${marker}. **${t.label}** — ${sid}`);
+      lines.push(`${marker}. **${t.label}**`);
     });
   }
 

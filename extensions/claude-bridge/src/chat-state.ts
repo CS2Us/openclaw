@@ -85,6 +85,34 @@ export function defaultTabLabel(state: ChatState): string {
   return `Tab ${state.tabs.length + 1}`;
 }
 
+/**
+ * Hard cap on tabs per chat. Browser-tab UX cliff: more than this and the
+ * panel becomes a wall of buttons, defeating the "one tap to switch" goal.
+ * Beyond the cap we LRU-evict the least-recently-used non-active tab.
+ */
+export const MAX_TABS = 5;
+
+/**
+ * If the chat is already at MAX_TABS, evict the least-recently-used tab so
+ * a new one can be added. The active tab is protected — we evict the next-
+ * oldest instead. Caller already holds `state` in-place; mutation is in-place.
+ */
+function evictOldestIfAtCap(state: ChatState): void {
+  if (state.tabs.length < MAX_TABS) {
+    return;
+  }
+  // Sort indices by lastUsedAt ascending; skip the active tab.
+  const sorted = state.tabs
+    .map((t, idx) => ({ t, idx }))
+    .filter(({ t }) => t.id !== state.activeTabId)
+    .toSorted((a, b) => a.t.lastUsedAt - b.t.lastUsedAt);
+  const victim = sorted[0];
+  if (!victim) {
+    return; // only the active tab exists somehow — let the caller add anyway
+  }
+  state.tabs.splice(victim.idx, 1);
+}
+
 export function isAutoLabel(label: string): boolean {
   return /^Tab \d+$/.test(label);
 }
@@ -99,6 +127,7 @@ export function deriveLabelFromPrompt(prompt: string, max = 24): string {
 
 export function createNewTab(key: ChatStateKey, opts?: { label?: string }): Tab {
   const state = getOrCreateChatState(key);
+  evictOldestIfAtCap(state);
   const id = allocateTabId(state);
   const now = Date.now();
   const tab: Tab = {
@@ -136,6 +165,7 @@ export function importSessionAsTab(
     persistChatState(key, snapshot(state));
     return existing;
   }
+  evictOldestIfAtCap(state);
   const id = allocateTabId(state);
   const now = Date.now();
   const tab: Tab = {
