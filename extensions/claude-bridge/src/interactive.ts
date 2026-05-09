@@ -20,9 +20,6 @@ import {
   resetChatState,
   switchActiveTab,
 } from "./chat-state.js";
-import { resolveProjectCwd, type ClaudeBridgeConfig } from "./handler.js";
-import { gatherRecentLocalSessions } from "./recent-sessions.js";
-import { listSessionFiles, readSessionInfo } from "./session-discovery.js";
 import { INTERACTIVE_NAMESPACE, parseCallbackPayload, renderTabManager } from "./tab-manager-ui.js";
 
 type TelegramButton = {
@@ -41,10 +38,9 @@ type TelegramInteractiveCtx = {
   };
 };
 
-export function createTabManagerInteractiveHandler(options: {
+export function createTabManagerInteractiveHandler(_options?: {
   pluginConfig?: unknown;
 }): PluginInteractiveHandlerRegistration {
-  const config = (options.pluginConfig ?? {}) as ClaudeBridgeConfig;
   return {
     channel: "telegram",
     namespace: INTERACTIVE_NAMESPACE,
@@ -59,6 +55,9 @@ export function createTabManagerInteractiveHandler(options: {
 
       const key = chatStateKey("telegram", t.callback.chatId);
       const parsed = parseCallbackPayload(t.callback.payload);
+      // closeTab / resetAll / import are no longer rendered as buttons but the
+      // parser still recognizes them so stale callback_data from old messages
+      // in chat history still works (defensive — see file header).
       switch (parsed.kind) {
         case "switch":
           switchActiveTab(key, parsed.tabId);
@@ -72,23 +71,9 @@ export function createTabManagerInteractiveHandler(options: {
         case "resetAll":
           resetChatState(key);
           break;
-        case "import": {
-          const cwd = resolveProjectCwd(config);
-          // Try to lift a label out of the imported jsonl's preview so the
-          // new tab arrives already-named instead of "Tab N".
-          let label: string | undefined;
-          if (cwd) {
-            const file = listSessionFiles(cwd).find((f) => f.sessionId === parsed.sessionId);
-            if (file) {
-              const info = readSessionInfo(file.jsonlPath);
-              if (info.preview) {
-                label = info.preview;
-              }
-            }
-          }
-          importSessionAsTab(key, parsed.sessionId, label ? { label } : undefined);
+        case "import":
+          importSessionAsTab(key, parsed.sessionId);
           break;
-        }
         case "refresh":
         case "unknown":
           // No state mutation; just re-render so the user sees the UI is alive.
@@ -96,9 +81,7 @@ export function createTabManagerInteractiveHandler(options: {
       }
 
       const state = getOrCreateChatState(key);
-      const cwd = resolveProjectCwd(config);
-      const recentLocalSessions = cwd ? gatherRecentLocalSessions({ state, cwd }) : [];
-      const refreshed = renderTabManager(state, { recentLocalSessions });
+      const refreshed = renderTabManager(state);
       await t.respond.editMessage({
         text: refreshed.text,
         buttons: interactiveBlocksToTelegramButtons(refreshed.interactive.blocks),

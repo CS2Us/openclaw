@@ -25,7 +25,6 @@ import {
   resolveGatewayUrl,
   resolvePermHookScriptPath,
 } from "./perm-hook-spawn.js";
-import { gatherRecentLocalSessions } from "./recent-sessions.js";
 import { findMostRecentSession } from "./session-discovery.js";
 import { renderTabManager } from "./tab-manager-ui.js";
 
@@ -67,16 +66,11 @@ async function handleClaudeCommand(
     return handleNewTab(key);
   }
 
-  // `/claude` (no args): show tab manager UI. The browser-tab metaphor means
-  // "I want to see / manage my tabs" rather than "wipe everything"; explicit
-  // reset lives on a button inside the manager.
+  // `/claude` (no args): show the tab manager — list of session titles +
+  // [+ 新 session] + numbered switch buttons. Tabs auto-evict at MAX_TABS.
   if (!args) {
     const state = getOrCreateChatState(key);
-    const projectCwd = resolveProjectCwd(config);
-    const recentLocalSessions = projectCwd
-      ? gatherRecentLocalSessions({ state, cwd: projectCwd })
-      : [];
-    const ui = renderTabManager(state, { recentLocalSessions });
+    const ui = renderTabManager(state);
     return {
       text: ui.text,
       interactive: ui.interactive,

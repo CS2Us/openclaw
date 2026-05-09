@@ -21,15 +21,18 @@ describe("parseCallbackPayload", () => {
     expect(parseCallbackPayload("nw")).toEqual({ kind: "newTab" });
   });
 
-  it("parses closeTab:<tabId>", () => {
+  // closeTab / resetAll / import are no longer rendered as buttons but the
+  // parser still recognizes them so stale callback_data from older messages
+  // in chat history still routes to a meaningful handler.
+  it("still parses closeTab:<tabId> for stale buttons", () => {
     expect(parseCallbackPayload("cl:t1")).toEqual({ kind: "closeTab", tabId: "t1" });
   });
 
-  it("parses resetAll", () => {
+  it("still parses resetAll for stale buttons", () => {
     expect(parseCallbackPayload("rs")).toEqual({ kind: "resetAll" });
   });
 
-  it("parses import:<sessionId>", () => {
+  it("still parses import:<sessionId> for stale buttons", () => {
     expect(parseCallbackPayload("im:5c4eb7ff-3fb9-4fde-be46-862bea97cf5f")).toEqual({
       kind: "import",
       sessionId: "5c4eb7ff-3fb9-4fde-be46-862bea97cf5f",
@@ -53,10 +56,10 @@ describe("buildCallbackData", () => {
 });
 
 describe("renderTabManager", () => {
-  it("empty state surfaces only the top [+ 新 session] row", () => {
+  it("empty state shows hint text + only the [+ 新 session] row", () => {
     const ui = renderTabManager(emptyState());
-    expect(ui.text).toContain("还没有 tab");
-    // Top new-session row, nothing else.
+    expect(ui.text).toContain("还没有会话");
+    // No tab-code rows, just the new-session row.
     expect(ui.interactive.blocks.length).toBe(1);
     const topRow = ui.interactive.blocks[0];
     if (topRow?.type !== "buttons") {
@@ -65,61 +68,48 @@ describe("renderTabManager", () => {
     expect(topRow.buttons.map((b) => b.value)).toEqual([buildCallbackData(ACTION.newTab)]);
   });
 
-  it("renders top new-session row, packed tab-code row, and danger row", () => {
+  it("renders [+ 新 session] then a packed numbered switch row — and nothing else", () => {
     const state: ChatState = {
       tabs: [
-        { id: "t1", sessionId: "abc12345xx", label: "张三", createdAt: 1, lastUsedAt: 1 },
-        { id: "t2", sessionId: null, label: "Tab 2", createdAt: 2, lastUsedAt: 2 },
+        { id: "t1", sessionId: "abc12345xx", label: "我叫张三", createdAt: 1, lastUsedAt: 1 },
+        { id: "t2", sessionId: null, label: "下一个会话", createdAt: 2, lastUsedAt: 2 },
       ],
       activeTabId: "t1",
       lastUsedAt: 2,
     };
     const ui = renderTabManager(state);
-    expect(ui.text).toContain("Tabs (2)");
-    expect(ui.text).toContain("张三");
-    // Text section maps codes to labels: ●1. 张三 / 2. Tab 2
-    expect(ui.text).toMatch(/●1\.\s+\*\*张三\*\*/);
-    expect(ui.text).toMatch(/2\.\s+\*\*Tab 2\*\*/);
 
-    // 1 top row + 1 packed tab row + 1 danger row
-    expect(ui.interactive.blocks.length).toBe(3);
+    // Text: numbered titles only, no `Tabs (N)：` header, no `— sid` suffix.
+    expect(ui.text).toMatch(/●1\.\s+\*\*我叫张三\*\*/);
+    expect(ui.text).toMatch(/2\.\s+\*\*下一个会话\*\*/);
+    expect(ui.text).not.toContain("—"); // no sid suffix
+    expect(ui.text).not.toContain("Tabs ("); // no header
+
+    // Buttons: [+ 新 session] row + one packed tab-code row. No danger row,
+    // no import row.
+    expect(ui.interactive.blocks.length).toBe(2);
 
     const topRow = ui.interactive.blocks[0];
     const tabRow = ui.interactive.blocks[1];
-    const dangerRow = ui.interactive.blocks[2];
-    if (topRow?.type !== "buttons" || tabRow?.type !== "buttons" || dangerRow?.type !== "buttons") {
+    if (topRow?.type !== "buttons" || tabRow?.type !== "buttons") {
       throw new Error("expected buttons blocks");
     }
-
     expect(topRow.buttons.map((b) => b.value)).toEqual([buildCallbackData(ACTION.newTab)]);
-
-    // Packed: [●1, 2] in same row, both routing to switch:<tabId>.
     expect(tabRow.buttons.map((b) => b.label)).toEqual(["●1", "2"]);
     expect(tabRow.buttons.map((b) => b.value)).toEqual([
       buildCallbackData(ACTION.switch, "t1"),
       buildCallbackData(ACTION.switch, "t2"),
     ]);
-
-    // Danger row only gets actionable buttons.
-    expect(dangerRow.buttons.map((b) => b.value)).toEqual([
-      buildCallbackData(ACTION.closeTab, "t1"),
-      buildCallbackData(ACTION.resetAll),
-    ]);
   });
 
-  it("hides Close when no active tab; danger row keeps Reset only", () => {
+  it("no active tab → tab-code button has no dot prefix", () => {
     const state: ChatState = {
       tabs: [{ id: "t1", sessionId: null, label: "Tab 1", createdAt: 1, lastUsedAt: 1 }],
       activeTabId: null,
       lastUsedAt: 1,
     };
     const ui = renderTabManager(state);
-    const dangerRow = ui.interactive.blocks.at(-1);
-    if (dangerRow?.type !== "buttons") {
-      throw new Error("expected buttons");
-    }
-    expect(dangerRow.buttons.map((b) => b.value)).toEqual([buildCallbackData(ACTION.resetAll)]);
-    // No active tab → tab-code button shows just "1" (no ●).
+    expect(ui.interactive.blocks.length).toBe(2); // top + tab row
     const tabRow = ui.interactive.blocks[1];
     if (tabRow?.type !== "buttons") {
       throw new Error("expected buttons");
@@ -134,8 +124,8 @@ describe("renderTabManager", () => {
     }
     const state: ChatState = { tabs, activeTabId: "t1", lastUsedAt: 8 };
     const ui = renderTabManager(state);
-    // top + tab-row1(6) + tab-row2(2) + danger
-    expect(ui.interactive.blocks.length).toBe(4);
+    // top row + tab-row1(6) + tab-row2(2) — no danger or import rows.
+    expect(ui.interactive.blocks.length).toBe(3);
     const tabRow1 = ui.interactive.blocks[1];
     const tabRow2 = ui.interactive.blocks[2];
     if (tabRow1?.type !== "buttons" || tabRow2?.type !== "buttons") {
@@ -145,33 +135,7 @@ describe("renderTabManager", () => {
     expect(tabRow2.buttons.map((b) => b.label)).toEqual(["7", "8"]);
   });
 
-  it("renders recent local sessions section with [↓ Import] buttons", () => {
-    const state: ChatState = {
-      tabs: [{ id: "t1", sessionId: "abc", label: "Tab 1", createdAt: 1, lastUsedAt: 1 }],
-      activeTabId: "t1",
-      lastUsedAt: 1,
-    };
-    const ui = renderTabManager(state, {
-      recentLocalSessions: [
-        { sessionId: "5c4eb7ff", preview: "我叫张三", eventCount: 5 },
-        { sessionId: "deadbeef", preview: null, eventCount: 1 },
-      ],
-    });
-    expect(ui.text).toContain("最近本地 session");
-    expect(ui.text).toContain("我叫张三");
-    // top + tab-row + danger + 2 import rows = 5
-    expect(ui.interactive.blocks.length).toBe(5);
-    const importRow1 = ui.interactive.blocks[3];
-    const importRow2 = ui.interactive.blocks[4];
-    if (importRow1?.type !== "buttons" || importRow2?.type !== "buttons") {
-      throw new Error("expected buttons");
-    }
-    expect(importRow1.buttons[0]?.value).toBe(buildCallbackData(ACTION.importSession, "5c4eb7ff"));
-    expect(importRow1.buttons[0]?.label).toContain("我叫张三");
-    expect(importRow2.buttons[0]?.label).toContain("Session ");
-  });
-
-  it("tab-code buttons stay short regardless of label length", () => {
+  it("long titles stay in text section; tab-code buttons stay one-or-two chars", () => {
     const long = "x".repeat(40);
     const state: ChatState = {
       tabs: [{ id: "t1", sessionId: null, label: long, createdAt: 1, lastUsedAt: 1 }],
@@ -183,9 +147,7 @@ describe("renderTabManager", () => {
     if (tabRow?.type !== "buttons") {
       throw new Error("expected buttons");
     }
-    // Code-based button: "●1" — long label moves to text section, button stays compact.
     expect(tabRow.buttons[0]?.label).toBe("●1");
-    // Text section still carries the full label.
     expect(ui.text).toContain(long);
   });
 });

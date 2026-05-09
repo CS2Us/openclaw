@@ -6,6 +6,13 @@
 // Callback wire format: `<INTERACTIVE_NAMESPACE>:<action>[:<arg>]`.
 // Telegram callback_data hard-caps at 64 bytes, including the namespace and
 // separator — keep namespace + actions terse.
+//
+// The visible UI is intentionally minimal: a list of session titles + a
+// [+ 新 session] button + numbered switch buttons. Close / reset / import
+// affordances were removed at user request — tabs are evicted automatically
+// (LRU at MAX_TABS) so the user never has to manage them by hand. The legacy
+// `closeTab` / `resetAll` / `importSession` action codes are still parsed so
+// stale buttons in chat history don't error out, but nothing renders them.
 
 import type { InteractiveReply } from "openclaw/plugin-sdk/interactive-runtime";
 import type { ChatState } from "./chat-state.js";
@@ -57,50 +64,30 @@ export function parseCallbackPayload(payload: string): ParsedCallback {
   }
 }
 
-/** Subset of `SessionInfo` that the UI needs — keeps the rendering pure and
- *  testable without importing fs-bound modules. */
-export type LocalSessionSummary = {
-  sessionId: string;
-  preview: string | null;
-  eventCount: number;
-};
-
 export function buildCallbackData(action: string, arg?: string): string {
   return arg ? `${INTERACTIVE_NAMESPACE}:${action}:${arg}` : `${INTERACTIVE_NAMESPACE}:${action}`;
 }
 
 const ACTIVE_DOT = "●";
-const MAX_LABEL_IN_BUTTON = 18; // keeps callback_data + label under telegram's row width sanity
 const TABS_PER_ROW = 6; // telegram allows up to 8 buttons/row; 6 keeps codes readable
 
-function truncateLabel(label: string, max = MAX_LABEL_IN_BUTTON): string {
-  if (label.length <= max) {
-    return label;
-  }
-  return `${label.slice(0, max - 1)}…`;
-}
-
 /**
- * Render the tab manager: a text summary plus a buttons block.
+ * Render the tab manager: list of session titles + new-session button +
+ * numbered switch buttons. Nothing else.
+ *
  * Layout:
- * - Top row: [+ 新 session] (always visible, prominent default).
- * - Tab-code rows: compact `[●1] [2] [3] …`, packed up to TABS_PER_ROW per row.
- *   The text section above maps each code to its full label.
- * - Danger row: [× 关闭当前] [🗑 重置全部] (only when applicable).
- * - Recent-local-session rows: one `[↓ <preview>]` per importable jsonl.
+ * - Text: numbered titles, e.g. `●1. <first question of session>`.
+ * - Top row: [+ 新 session].
+ * - Tab-code rows: `[●1] [2] [3] …`, packed up to TABS_PER_ROW per row.
  */
-export function renderTabManager(
-  state: ChatState,
-  opts?: { recentLocalSessions?: readonly LocalSessionSummary[] },
-): {
+export function renderTabManager(state: ChatState): {
   text: string;
   interactive: InteractiveReply;
 } {
   const lines: string[] = [];
   if (state.tabs.length === 0) {
-    lines.push("还没有 tab。点 [+ 新 session] 起一个。");
+    lines.push("还没有会话。点 [+ 新 session] 起一个。");
   } else {
-    lines.push(`Tabs (${state.tabs.length})：`);
     state.tabs.forEach((t, idx) => {
       const active = t.id === state.activeTabId;
       const code = idx + 1;
@@ -111,7 +98,7 @@ export function renderTabManager(
 
   const buttonRows: InteractiveReply["blocks"] = [];
 
-  // Top row: [+ 新 session] — always present so users can always start fresh.
+  // Top row: [+ 新 session].
   buttonRows.push({
     type: "buttons",
     buttons: [{ label: "+ 新 session", value: buildCallbackData(ACTION.newTab), style: "primary" }],
@@ -131,55 +118,6 @@ export function renderTabManager(
         };
       }),
     });
-  }
-
-  // Danger row: only show buttons that are meaningful for the current state.
-  const dangerActions: {
-    label: string;
-    value: string;
-    style?: "primary" | "danger" | "secondary";
-  }[] = [];
-  if (state.activeTabId) {
-    dangerActions.push({
-      label: "× 关闭当前",
-      value: buildCallbackData(ACTION.closeTab, state.activeTabId),
-    });
-  }
-  if (state.tabs.length > 0) {
-    dangerActions.push({
-      label: "🗑 重置全部",
-      value: buildCallbackData(ACTION.resetAll),
-      style: "danger",
-    });
-  }
-  if (dangerActions.length > 0) {
-    buttonRows.push({ type: "buttons", buttons: dangerActions });
-  }
-
-  // Recent local sessions section (post-actions so primary controls stay on top).
-  const recent = opts?.recentLocalSessions ?? [];
-  if (recent.length > 0) {
-    lines.push("");
-    lines.push("最近本地 session（点导入为新 tab）：");
-    for (const s of recent) {
-      const previewLine = s.preview ?? "(no preview)";
-      lines.push(`• ${truncateLabel(previewLine, 60)} — \`${s.sessionId.slice(0, 8)}\``);
-    }
-    // One row per import button — preview text can be long, keep readable.
-    for (const s of recent) {
-      const previewLabel = s.preview
-        ? truncateLabel(s.preview, MAX_LABEL_IN_BUTTON)
-        : `Session ${s.sessionId.slice(0, 8)}`;
-      buttonRows.push({
-        type: "buttons",
-        buttons: [
-          {
-            label: `↓ ${previewLabel}`,
-            value: buildCallbackData(ACTION.importSession, s.sessionId),
-          },
-        ],
-      });
-    }
   }
 
   return {
