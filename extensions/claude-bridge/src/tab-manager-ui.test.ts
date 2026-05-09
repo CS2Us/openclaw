@@ -53,18 +53,19 @@ describe("buildCallbackData", () => {
 });
 
 describe("renderTabManager", () => {
-  it("empty state surfaces a [+ 新 tab] action only", () => {
+  it("empty state surfaces only the top [+ 新 session] row", () => {
     const ui = renderTabManager(emptyState());
     expect(ui.text).toContain("还没有 tab");
-    // No tab rows, only the action row
-    const actionRow = ui.interactive.blocks[0];
-    if (actionRow?.type !== "buttons") {
+    // Top new-session row, nothing else.
+    expect(ui.interactive.blocks.length).toBe(1);
+    const topRow = ui.interactive.blocks[0];
+    if (topRow?.type !== "buttons") {
       throw new Error("expected buttons");
     }
-    expect(actionRow.buttons.map((b) => b.value)).toEqual([buildCallbackData(ACTION.newTab)]);
+    expect(topRow.buttons.map((b) => b.value)).toEqual([buildCallbackData(ACTION.newTab)]);
   });
 
-  it("renders one switch row per tab plus action row", () => {
+  it("renders top new-session row, packed tab-code row, and danger row", () => {
     const state: ChatState = {
       tabs: [
         { id: "t1", sessionId: "abc12345xx", label: "张三", createdAt: 1, lastUsedAt: 1 },
@@ -76,46 +77,72 @@ describe("renderTabManager", () => {
     const ui = renderTabManager(state);
     expect(ui.text).toContain("Tabs (2)");
     expect(ui.text).toContain("张三");
-    // 2 tab rows + 1 action row
+    // Text section maps codes to labels: ●1. 张三 / 2. Tab 2
+    expect(ui.text).toMatch(/●1\.\s+\*\*张三\*\*/);
+    expect(ui.text).toMatch(/2\.\s+\*\*Tab 2\*\*/);
+
+    // 1 top row + 1 packed tab row + 1 danger row
     expect(ui.interactive.blocks.length).toBe(3);
 
-    const tabRow1 = ui.interactive.blocks[0];
-    const tabRow2 = ui.interactive.blocks[1];
-    const actionRow = ui.interactive.blocks[2];
-    if (
-      tabRow1?.type !== "buttons" ||
-      tabRow2?.type !== "buttons" ||
-      actionRow?.type !== "buttons"
-    ) {
+    const topRow = ui.interactive.blocks[0];
+    const tabRow = ui.interactive.blocks[1];
+    const dangerRow = ui.interactive.blocks[2];
+    if (topRow?.type !== "buttons" || tabRow?.type !== "buttons" || dangerRow?.type !== "buttons") {
       throw new Error("expected buttons blocks");
     }
-    expect(tabRow1.buttons[0]?.value).toBe(buildCallbackData(ACTION.switch, "t1"));
-    expect(tabRow1.buttons[0]?.label.startsWith("●")).toBe(true);
-    expect(tabRow2.buttons[0]?.label.startsWith("○")).toBe(true);
 
-    const actionValues = actionRow.buttons.map((b) => b.value);
-    expect(actionValues).toEqual([
-      buildCallbackData(ACTION.newTab),
+    expect(topRow.buttons.map((b) => b.value)).toEqual([buildCallbackData(ACTION.newTab)]);
+
+    // Packed: [●1, 2] in same row, both routing to switch:<tabId>.
+    expect(tabRow.buttons.map((b) => b.label)).toEqual(["●1", "2"]);
+    expect(tabRow.buttons.map((b) => b.value)).toEqual([
+      buildCallbackData(ACTION.switch, "t1"),
+      buildCallbackData(ACTION.switch, "t2"),
+    ]);
+
+    // Danger row only gets actionable buttons.
+    expect(dangerRow.buttons.map((b) => b.value)).toEqual([
       buildCallbackData(ACTION.closeTab, "t1"),
       buildCallbackData(ACTION.resetAll),
     ]);
   });
 
-  it("hides Close button when no active tab", () => {
+  it("hides Close when no active tab; danger row keeps Reset only", () => {
     const state: ChatState = {
       tabs: [{ id: "t1", sessionId: null, label: "Tab 1", createdAt: 1, lastUsedAt: 1 }],
       activeTabId: null,
       lastUsedAt: 1,
     };
     const ui = renderTabManager(state);
-    const actionRow = ui.interactive.blocks.at(-1);
-    if (actionRow?.type !== "buttons") {
+    const dangerRow = ui.interactive.blocks.at(-1);
+    if (dangerRow?.type !== "buttons") {
       throw new Error("expected buttons");
     }
-    expect(actionRow.buttons.map((b) => b.value)).toEqual([
-      buildCallbackData(ACTION.newTab),
-      buildCallbackData(ACTION.resetAll),
-    ]);
+    expect(dangerRow.buttons.map((b) => b.value)).toEqual([buildCallbackData(ACTION.resetAll)]);
+    // No active tab → tab-code button shows just "1" (no ●).
+    const tabRow = ui.interactive.blocks[1];
+    if (tabRow?.type !== "buttons") {
+      throw new Error("expected buttons");
+    }
+    expect(tabRow.buttons[0]?.label).toBe("1");
+  });
+
+  it("packs more than TABS_PER_ROW tabs across multiple rows", () => {
+    const tabs: ChatState["tabs"] = [];
+    for (let i = 1; i <= 8; i++) {
+      tabs.push({ id: `t${i}`, sessionId: null, label: `Tab ${i}`, createdAt: i, lastUsedAt: i });
+    }
+    const state: ChatState = { tabs, activeTabId: "t1", lastUsedAt: 8 };
+    const ui = renderTabManager(state);
+    // top + tab-row1(6) + tab-row2(2) + danger
+    expect(ui.interactive.blocks.length).toBe(4);
+    const tabRow1 = ui.interactive.blocks[1];
+    const tabRow2 = ui.interactive.blocks[2];
+    if (tabRow1?.type !== "buttons" || tabRow2?.type !== "buttons") {
+      throw new Error("expected buttons");
+    }
+    expect(tabRow1.buttons.map((b) => b.label)).toEqual(["●1", "2", "3", "4", "5", "6"]);
+    expect(tabRow2.buttons.map((b) => b.label)).toEqual(["7", "8"]);
   });
 
   it("renders recent local sessions section with [↓ Import] buttons", () => {
@@ -132,10 +159,10 @@ describe("renderTabManager", () => {
     });
     expect(ui.text).toContain("最近本地 session");
     expect(ui.text).toContain("我叫张三");
-    // tab row + action row + 2 import rows = 4
-    expect(ui.interactive.blocks.length).toBe(4);
-    const importRow1 = ui.interactive.blocks[2];
-    const importRow2 = ui.interactive.blocks[3];
+    // top + tab-row + danger + 2 import rows = 5
+    expect(ui.interactive.blocks.length).toBe(5);
+    const importRow1 = ui.interactive.blocks[3];
+    const importRow2 = ui.interactive.blocks[4];
     if (importRow1?.type !== "buttons" || importRow2?.type !== "buttons") {
       throw new Error("expected buttons");
     }
@@ -144,7 +171,7 @@ describe("renderTabManager", () => {
     expect(importRow2.buttons[0]?.label).toContain("Session ");
   });
 
-  it("truncates long labels in button text", () => {
+  it("tab-code buttons stay short regardless of label length", () => {
     const long = "x".repeat(40);
     const state: ChatState = {
       tabs: [{ id: "t1", sessionId: null, label: long, createdAt: 1, lastUsedAt: 1 }],
@@ -152,13 +179,13 @@ describe("renderTabManager", () => {
       lastUsedAt: 1,
     };
     const ui = renderTabManager(state);
-    const tabRow = ui.interactive.blocks[0];
+    const tabRow = ui.interactive.blocks[1];
     if (tabRow?.type !== "buttons") {
       throw new Error("expected buttons");
     }
-    // active dot + space + truncated label, well under telegram's button text budget
-    const btn = tabRow.buttons[0];
-    expect(btn?.label.length).toBeLessThan(30);
-    expect(btn?.label.endsWith("…")).toBe(true);
+    // Code-based button: "●1" — long label moves to text section, button stays compact.
+    expect(tabRow.buttons[0]?.label).toBe("●1");
+    // Text section still carries the full label.
+    expect(ui.text).toContain(long);
   });
 });

@@ -8,7 +8,7 @@
 // separator — keep namespace + actions terse.
 
 import type { InteractiveReply } from "openclaw/plugin-sdk/interactive-runtime";
-import type { ChatState, Tab } from "./chat-state.js";
+import type { ChatState } from "./chat-state.js";
 
 /** Single source of truth for the interactive callback namespace. */
 export const INTERACTIVE_NAMESPACE = "cb";
@@ -70,8 +70,8 @@ export function buildCallbackData(action: string, arg?: string): string {
 }
 
 const ACTIVE_DOT = "●";
-const INACTIVE_DOT = "○";
 const MAX_LABEL_IN_BUTTON = 18; // keeps callback_data + label under telegram's row width sanity
+const TABS_PER_ROW = 6; // telegram allows up to 8 buttons/row; 6 keeps codes readable
 
 function truncateLabel(label: string, max = MAX_LABEL_IN_BUTTON): string {
   if (label.length <= max) {
@@ -80,21 +80,14 @@ function truncateLabel(label: string, max = MAX_LABEL_IN_BUTTON): string {
   return `${label.slice(0, max - 1)}…`;
 }
 
-function formatTabButton(tab: Tab, active: boolean): { label: string; value: string } {
-  const dot = active ? ACTIVE_DOT : INACTIVE_DOT;
-  return {
-    label: `${dot} ${truncateLabel(tab.label)}`,
-    value: buildCallbackData(ACTION.switch, tab.id),
-  };
-}
-
 /**
  * Render the tab manager: a text summary plus a buttons block.
- * - Each chat-state tab is its own row's button (one row keeps active dot crisp).
- * - Action row: [+ New] [Close active] [Reset]
- * - Optional bottom section: recent local jsonl sessions in the cwd that
- *   weren't created via the bot (e.g. VSCode IDE / terminal claude). Each
- *   gets a `[↓ Import]` button that creates a new tab pinned to it.
+ * Layout:
+ * - Top row: [+ 新 session] (always visible, prominent default).
+ * - Tab-code rows: compact `[●1] [2] [3] …`, packed up to TABS_PER_ROW per row.
+ *   The text section above maps each code to its full label.
+ * - Danger row: [× 关闭当前] [🗑 重置全部] (only when applicable).
+ * - Recent-local-session rows: one `[↓ <preview>]` per importable jsonl.
  */
 export function renderTabManager(
   state: ChatState,
@@ -105,45 +98,64 @@ export function renderTabManager(
 } {
   const lines: string[] = [];
   if (state.tabs.length === 0) {
-    lines.push("还没有 tab。点 [+ 新 tab] 起一个。");
+    lines.push("还没有 tab。点 [+ 新 session] 起一个。");
   } else {
     lines.push(`Tabs (${state.tabs.length})：`);
-    for (const t of state.tabs) {
+    state.tabs.forEach((t, idx) => {
       const active = t.id === state.activeTabId;
+      const code = idx + 1;
       const sid = t.sessionId ? `\`${t.sessionId.slice(0, 8)}\`` : "未起 session";
-      lines.push(`${active ? ACTIVE_DOT : INACTIVE_DOT} **${t.label}** — ${sid}`);
-    }
+      const marker = active ? `${ACTIVE_DOT}${code}` : ` ${code}`;
+      lines.push(`${marker}. **${t.label}** — ${sid}`);
+    });
   }
 
   const buttonRows: InteractiveReply["blocks"] = [];
 
-  // One row per tab — the dot keeps the active one obvious.
-  for (const t of state.tabs) {
-    const active = t.id === state.activeTabId;
+  // Top row: [+ 新 session] — always present so users can always start fresh.
+  buttonRows.push({
+    type: "buttons",
+    buttons: [{ label: "+ 新 session", value: buildCallbackData(ACTION.newTab), style: "primary" }],
+  });
+
+  // Compact tab-code rows: positional index keyed to text section above.
+  for (let i = 0; i < state.tabs.length; i += TABS_PER_ROW) {
+    const slice = state.tabs.slice(i, i + TABS_PER_ROW);
     buttonRows.push({
       type: "buttons",
-      buttons: [formatTabButton(t, active)],
+      buttons: slice.map((t, j) => {
+        const active = t.id === state.activeTabId;
+        const code = i + j + 1;
+        return {
+          label: active ? `${ACTIVE_DOT}${code}` : `${code}`,
+          value: buildCallbackData(ACTION.switch, t.id),
+        };
+      }),
     });
   }
 
-  // Action row.
-  const actions: { label: string; value: string; style?: "primary" | "danger" | "secondary" }[] = [
-    { label: "+ 新 tab", value: buildCallbackData(ACTION.newTab), style: "primary" },
-  ];
+  // Danger row: only show buttons that are meaningful for the current state.
+  const dangerActions: {
+    label: string;
+    value: string;
+    style?: "primary" | "danger" | "secondary";
+  }[] = [];
   if (state.activeTabId) {
-    actions.push({
+    dangerActions.push({
       label: "× 关闭当前",
       value: buildCallbackData(ACTION.closeTab, state.activeTabId),
     });
   }
   if (state.tabs.length > 0) {
-    actions.push({
+    dangerActions.push({
       label: "🗑 重置全部",
       value: buildCallbackData(ACTION.resetAll),
       style: "danger",
     });
   }
-  buttonRows.push({ type: "buttons", buttons: actions });
+  if (dangerActions.length > 0) {
+    buttonRows.push({ type: "buttons", buttons: dangerActions });
+  }
 
   // Recent local sessions section (post-actions so primary controls stay on top).
   const recent = opts?.recentLocalSessions ?? [];
