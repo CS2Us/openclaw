@@ -1,0 +1,22 @@
+{
+  "name": "@openclaw/claude-overnight",
+  "version": "0.1.0",
+  "description": "Run local Claude Code unattended overnight with auto-resume across 5h rate-limit windows.",
+  "type": "module",
+  "devDependencies": {
+    "@openclaw/plugin-sdk": "workspace:*"
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ],
+    "build": {
+      "staticAssets": [
+        {
+          "source": "scripts/overnight-supervisor.cjs",
+          "output": "scripts/overnight-supervisor.cjs"
+        }
+      ]
+    }
+  }
+}
