@@ -29,7 +29,6 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
-const https = require("node:https");
 
 // ---- argv parsing ---------------------------------------------------------
 
@@ -55,7 +54,17 @@ const ALLOWED_TOOLS = args["allowed-tools"];
 const MAX_ITERS = parseInt(args["max-iterations"] || "24", 10);
 const RATE_FALLBACK_SEC = parseInt(args["rate-limit-fallback-sec"] || "18300", 10);
 const ITER_TIMEOUT_MS = parseInt(args["iteration-timeout-ms"] || "3600000", 10);
-const CHAT_ID = args["telegram-chat-id"];
+// Normalize chat id: openclaw command ctx may give the openclaw session-key
+// format (e.g. "telegram:5028451986") rather than the raw Telegram chat id.
+// Telegram bot API needs the raw numeric id; strip any "<channel>:" prefix and
+// any trailing ":<thread>" suffix.
+const CHAT_ID = (function normalizeChatId(raw) {
+  if (raw == null) return undefined;
+  const s = String(raw).trim();
+  // "telegram:NUMERIC" or "telegram:NUMERIC:thread" → take middle/last numeric
+  const m = s.match(/^(?:[a-z][a-z0-9-]*:)?(-?\d+)(?::|$)/i);
+  return m ? m[1] : s;
+})(args["telegram-chat-id"]);
 const PROMPT = args.prompt;
 const TG_TOKEN = process.env.TG_BOT_TOKEN || "";
 
@@ -120,41 +129,47 @@ function appendLog(line) {
 
 // ---- Telegram notify ------------------------------------------------------
 
-function telegramSend(text) {
-  return new Promise((resolve) => {
-    if (!TG_TOKEN) {
-      resolve(false);
-      return;
+// Use Node's native fetch() — it honors $HTTPS_PROXY / $http_proxy when node
+// is invoked with --use-env-proxy (added in Node 24+). Supervisor is spawned
+// by commands.ts with `--use-env-proxy` for exactly this reason: on transparent-
+// proxy networks (Clash fake-IP api.telegram.org), direct connect to fake IP
+// fails silently — only by going through the local proxy can sendMessage land.
+//
+// 2026-05-11 first /overnight run: supervisor's notify trail vanished
+// (claude completed but you got 0 of 3 supervisor messages). The command-
+// handler ack message in commands.ts handleRun() went through fine because it
+// flows back via daemon's telegram channel which has proxy wiring; supervisor
+// is a detached cjs that didn't (until this fix).
+async function telegramSend(text) {
+  if (!TG_TOKEN) {
+    appendLog("telegram: TG_TOKEN missing");
+    return false;
+  }
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${TG_TOKEN}/sendMessage`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        chat_id: CHAT_ID,
+        text,
+        disable_web_page_preview: true,
+      }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) {
+      // Keep this — without it the 2026-05-11 first-run "chat not found"
+      // bug stayed silent for 4 supervisor invocations. rc + body lets future
+      // debuggers see the Telegram API response (400 / 401 / rate limit / …).
+      const body = await res.text().catch(() => "");
+      appendLog(`telegram send rc=${res.status} body=${body.slice(0, 200)}`);
     }
-    const body = JSON.stringify({
-      chat_id: CHAT_ID,
-      text,
-      disable_web_page_preview: true,
-    });
-    const req = https.request(
-      {
-        hostname: "api.telegram.org",
-        path: `/bot${TG_TOKEN}/sendMessage`,
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "content-length": Buffer.byteLength(body),
-        },
-        timeout: 10_000,
-      },
-      (res) => {
-        res.on("data", () => {});
-        res.on("end", () => resolve(res.statusCode >= 200 && res.statusCode < 300));
-      },
+    return res.ok;
+  } catch (err) {
+    appendLog(
+      `telegram send error: name=${err && err.name} message=${err && err.message} cause=${err && err.cause && err.cause.code}`,
     );
-    req.on("error", () => resolve(false));
-    req.on("timeout", () => {
-      req.destroy();
-      resolve(false);
-    });
-    req.write(body);
-    req.end();
-  });
+    return false;
+  }
 }
 
 async function notify(text) {

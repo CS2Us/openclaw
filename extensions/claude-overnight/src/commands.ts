@@ -189,6 +189,11 @@ async function handleOvernight(
   const child = spawn(
     process.execPath,
     [
+      // Honor $https_proxy / $http_proxy in supervisor's native fetch().
+      // Without this, supervisor's notify trail vanishes on transparent-proxy
+      // networks (Clash fake-IP api.telegram.org). See 2026-05-11 overnight
+      // first-run discovery.
+      "--use-env-proxy",
       supervisor,
       "--sid",
       sid,
