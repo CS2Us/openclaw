@@ -5,12 +5,12 @@ import type {
 } from "openclaw/plugin-sdk/plugin-runtime";
 import {
   chatStateKey,
-  createNewTab,
   getActiveTab,
   getOrCreateChatState,
   seedActiveTabLabel,
   updateChatStateAfterTurn,
 } from "./chat-state.js";
+import { writeFollowMarker } from "./follow-marker.js";
 import {
   resolveDefaults,
   resolveProjectCwd,
@@ -49,10 +49,24 @@ export function createClaudeBridgeFallthroughHandler(options: {
     const key = chatStateKey(event.channel, event.chatId);
     const state = getOrCreateChatState(key);
 
-    // Plain DM goes to the active tab. If no tab exists yet (fresh chat or
-    // post-reset), auto-create one so the user doesn't have to /claude first.
+    // Strict routing (2026-05-12): plain DM only routes when the user has
+    // *explicitly* entered a session — via `/claude` panel ([N] / [+ 新 session])
+    // or the approval-nudge `[👁 进入]` button. Daemon restart no longer
+    // restores the previous active tab (see chat-state.fromPersisted). If no
+    // active tab, refuse to route and prompt the user to pick.
+    //
+    // Rationale: user opens Telegram fresh and types something — without
+    // this check the message silently lands in whatever session was active
+    // before the restart, which is surprising / can leak between contexts.
     if (!getActiveTab(state)) {
-      createNewTab(key);
+      return {
+        handled: true,
+        reply:
+          "📌 还没选中 session。先发 /claude 看面板：\n" +
+          "  • 点 `[N]` 切到最近的某条 session\n" +
+          "  • 或 `[+ 新 session]` 开新对话\n" +
+          "选好之后，plain DM 都路由到那条 session。",
+      };
     }
     // Lock the label to *this* prompt before claude even spawns — turn-start
     // ordering wins so two rapid messages don't fight over the label at
@@ -77,6 +91,17 @@ export function createClaudeBridgeFallthroughHandler(options: {
         })
       : null;
 
+    // Plain DM means "I'm engaged with this session right now" — write the
+    // follow marker proactively so perm-hook.cjs skips the `[👁 进入]` nudge
+    // (the user is already in the session by typing into it). The mid-call
+    // write is fine: claude is about to spawn → tool call → perm-hook → poll
+    // marker, all within a few seconds. updateChatStateAfterTurn below may
+    // rewrite active.sessionId if claude started a fresh session id; we also
+    // mirror that into the marker (the post-turn write is cheap and idempotent).
+    if (active?.sessionId) {
+      writeFollowMarker(event.chatId, active.sessionId);
+    }
+
     const result = await runClaude({
       bin: claudeBin,
       cwd: projectCwd,
@@ -89,6 +114,9 @@ export function createClaudeBridgeFallthroughHandler(options: {
     });
 
     updateChatStateAfterTurn(key, result.newSessionId);
+    if (result.newSessionId) {
+      writeFollowMarker(event.chatId, result.newSessionId);
+    }
 
     return { handled: true, reply: truncate(result.text, maxReplyChars) };
   };

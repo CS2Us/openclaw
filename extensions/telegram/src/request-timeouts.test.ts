@@ -13,8 +13,13 @@ describe("resolveTelegramRequestTimeoutMs", () => {
     expect(resolveTelegramRequestTimeoutMs("setwebhook")).toBe(15_000);
   });
 
-  it("keeps the longer polling timeout for getUpdates", () => {
-    expect(resolveTelegramRequestTimeoutMs("getupdates")).toBe(45_000);
+  it("uses a tight 15s hard-abort for getUpdates to survive proxy idle drops", () => {
+    // 15s = grammY's 10s long-poll + RTT slack. Was 45s (grammy upstream
+    // default); through Clash-style proxies that idle-drop after 30-60s the
+    // 45s window let connections zombie for two full failure cycles (~90s),
+    // exceeding the 110s server-side approval timeout. See monitor.ts +
+    // request-timeouts.ts for rationale.
+    expect(resolveTelegramRequestTimeoutMs("getupdates")).toBe(15_000);
   });
 
   it("bounds outbound delivery methods", () => {
@@ -29,7 +34,7 @@ describe("resolveTelegramRequestTimeoutMs", () => {
     expect(resolveTelegramRequestTimeoutMs("sendmessage", 90)).toBe(90_000);
     expect(resolveTelegramRequestTimeoutMs("sendchataction", 90)).toBe(90_000);
     expect(resolveTelegramRequestTimeoutMs("editmessagetext", 90)).toBe(90_000);
-    expect(resolveTelegramRequestTimeoutMs("getupdates", 90)).toBe(45_000);
+    expect(resolveTelegramRequestTimeoutMs("getupdates", 90)).toBe(15_000);
   });
 
   it("does not let low timeoutSeconds shorten method guards", () => {

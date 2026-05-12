@@ -22,6 +22,7 @@ import {
   persistChatState,
   type PersistedChatStateRecord,
 } from "./chat-state-store.js";
+import { chatIdFromChatKey, clearFollowMarker, writeFollowMarker } from "./follow-marker.js";
 
 export type ChatStateKey = string;
 export type TabId = string;
@@ -215,12 +216,16 @@ export function registerFollow(key: ChatStateKey, handle: FollowHandle): void {
   // Stop any previous follow for this chat — only one stream at a time.
   stopActiveFollow(key);
   ACTIVE_FOLLOWS.set(key, handle);
+  // Mirror to filesystem so perm-hook.cjs (child process) can poll for the
+  // "user entered session" signal and stop holding back the approval card.
+  writeFollowMarker(chatIdFromChatKey(key), handle.sessionId);
 }
 
 export function stopActiveFollow(key: ChatStateKey): FollowHandle | undefined {
   const existing = ACTIVE_FOLLOWS.get(key);
   if (!existing) return undefined;
   ACTIVE_FOLLOWS.delete(key);
+  clearFollowMarker(chatIdFromChatKey(key), existing.sessionId);
   try {
     existing.cleanup();
   } catch {
@@ -367,14 +372,23 @@ function snapshot(state: ChatState): PersistedChatStateRecord {
 }
 
 function fromPersisted(record: PersistedChatStateRecord): ChatState {
+  // Strict routing (2026-05-12): never restore `activeTabId` across daemon
+  // restart. The user must explicitly re-enter a session via `/claude`
+  // panel ([N] switch / [+ 新 session]) or the approval-nudge `[👁 进入]`
+  // button before plain DMs route to a claude session. Reason: the user
+  // opens Telegram fresh and expects to consciously choose where their
+  // message goes, not have it silently land in whatever was active last
+  // session. Tabs (session metadata) still hydrate so the `/claude` panel
+  // can list recent sessions to pick from.
   if (Array.isArray(record.tabs)) {
     return {
       tabs: record.tabs.map((t) => ({ ...t })),
-      activeTabId: record.activeTabId ?? null,
+      activeTabId: null,
       lastUsedAt: record.lastUsedAt,
     };
   }
   // Legacy v1 record: { sessionId, lastUsedAt } — migrate to a single tab.
+  // Same strict rule: tab is present in the pool, but not active.
   const legacy = record as unknown as { sessionId: string | null; lastUsedAt: number };
   if (legacy.sessionId) {
     return {
@@ -387,7 +401,7 @@ function fromPersisted(record: PersistedChatStateRecord): ChatState {
           lastUsedAt: legacy.lastUsedAt,
         },
       ],
-      activeTabId: "t1",
+      activeTabId: null,
       lastUsedAt: legacy.lastUsedAt,
     };
   }

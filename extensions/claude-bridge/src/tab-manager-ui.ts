@@ -26,6 +26,20 @@ export const ACTION = {
   refresh: "rf",
   follow: "fo", // start real-time tail of active session into telegram
   unfollow: "uf", // stop the current follow
+  // One-tap "enter session + auto-follow + replay last turn". Used by the
+  // approval-companion message (perm-hook.cjs) so the user can step into the
+  // session that triggered an approval card without manually opening /claude.
+  // Payload: cb:ef:<sessionId>
+  enterAndFollow: "ef",
+  // Approval decision from claude-bridge's *own* approval card sent directly
+  // by perm-hook.cjs. Bypasses openclaw's standard channel approval handler
+  // delivery (which was unreliable through Clash proxy). Decision shortcodes:
+  // a1=allow-once, aa=allow-always, dn=deny. Payload:
+  //   cb:ad:<approvalId>:<a1|aa|dn>
+  // Interactive handler calls plugin.approval.resolve via the loopback WS
+  // client (daemon-gateway-client.ts); perm-hook's waitDecision returns
+  // instantly via the gateway's resolved event — no file IPC.
+  approveDecision: "ad",
   // Legacy action codes parsed (so stale callback_data in chat history doesn't
   // error out) but no longer rendered as buttons.
   closeTab: "cl",
@@ -33,16 +47,26 @@ export const ACTION = {
   importSession: "im",
 } as const;
 
+export type ApprovalDecision = "allow-once" | "allow-always" | "deny";
+
 export type ParsedCallback =
   | { kind: "switch"; sessionId: string }
   | { kind: "newTab" }
   | { kind: "refresh" }
   | { kind: "follow" }
   | { kind: "unfollow" }
+  | { kind: "enterAndFollow"; sessionId: string }
+  | { kind: "approveDecision"; approvalId: string; decision: ApprovalDecision }
   | { kind: "closeTab"; tabId: string }
   | { kind: "resetAll" }
   | { kind: "import"; sessionId: string }
   | { kind: "unknown"; raw: string };
+
+const APPROVAL_DECISION_SHORTCODES: Record<string, ApprovalDecision> = {
+  a1: "allow-once",
+  aa: "allow-always",
+  dn: "deny",
+};
 
 export function parseCallbackPayload(payload: string): ParsedCallback {
   const [action, ...rest] = payload.split(":");
@@ -57,6 +81,18 @@ export function parseCallbackPayload(payload: string): ParsedCallback {
       return { kind: "follow" };
     case ACTION.unfollow:
       return { kind: "unfollow" };
+    case ACTION.enterAndFollow:
+      return { kind: "enterAndFollow", sessionId: rest.join(":") };
+    case ACTION.approveDecision: {
+      // Payload format: cb:ad:<approvalId>:<shortcode>. approvalId may contain
+      // colons (UUIDs don't, but be defensive); shortcode is the *last* part.
+      if (rest.length < 2) return { kind: "unknown", raw: payload };
+      const shortcode = rest[rest.length - 1];
+      const approvalId = rest.slice(0, -1).join(":");
+      const decision = APPROVAL_DECISION_SHORTCODES[shortcode];
+      if (!approvalId || !decision) return { kind: "unknown", raw: payload };
+      return { kind: "approveDecision", approvalId, decision };
+    }
     case ACTION.closeTab:
       return { kind: "closeTab", tabId: rest.join(":") };
     case ACTION.resetAll:
@@ -72,7 +108,6 @@ export function buildCallbackData(action: string, arg?: string): string {
   return arg ? `${INTERACTIVE_NAMESPACE}:${action}:${arg}` : `${INTERACTIVE_NAMESPACE}:${action}`;
 }
 
-const ACTIVE_DOT = "●";
 const MAX_PANEL_ENTRIES = 3;
 
 export type PanelEntry = {
@@ -115,15 +150,32 @@ function shortPreview(preview: string | null, max: number = 40): string {
  *
  * Layout:
  * - Optional header (e.g. "📍 切到 session X")
- * - Numbered list of top-3 pool sessions: "●1 <relative-time> | <preview>"
- * - Top button: [+ 新 session]
- * - Switch button row: [●1] [2] [3]
+ * - "📌 当前: <sid> <preview>" line — *only* when activeSessionId is in entries
+ * - Numbered list of OTHER sessions (current excluded): " 1 <sid> <time> <preview>"
+ * - Top buttons: [+ 新 session] + (live follow toggle when active)
+ * - Switch button row: [1] [2] [3] — for the OTHERS only; clicking switches
+ *   to that other session
+ *
+ * Design rationale: plain DM continues the current session (no click needed),
+ * so the current session doesn't need to be a switch target. Surface it as a
+ * "you're here" badge; let the numbered list be a pure menu of switch
+ * candidates — fewer mental steps + no "click 1 when 1 is already current".
  */
 export function renderPanel(input: RenderPanelInput): {
   text: string;
   interactive: InteractiveReply;
 } {
-  const entries = input.entries.slice(0, MAX_PANEL_ENTRIES);
+  // Pool can include the current session — separate it out so the numbered
+  // switch list contains only candidates the user could meaningfully jump to.
+  const allEntries = input.entries;
+  const currentEntry =
+    input.activeSessionId != null
+      ? (allEntries.find((e) => e.sessionId === input.activeSessionId) ?? null)
+      : null;
+  const otherEntries = allEntries
+    .filter((e) => e.sessionId !== input.activeSessionId)
+    .slice(0, MAX_PANEL_ENTRIES);
+
   const lines: string[] = [];
 
   if (input.header) {
@@ -131,18 +183,32 @@ export function renderPanel(input: RenderPanelInput): {
     lines.push("");
   }
 
-  if (entries.length === 0) {
-    lines.push("📜 还没有 claude session。点 [+ 新 session] 起一个。");
-  } else {
-    lines.push("📜 最近 claude session（按活跃时间）：");
+  if (currentEntry) {
+    const sidShort = currentEntry.sessionId.slice(0, 8);
+    lines.push(
+      `📌 当前: \`${sidShort}\`  ${shortPreview(currentEntry.preview)}  · plain DM 直接续聊`,
+    );
     lines.push("");
-    entries.forEach((entry, idx) => {
+  } else if (input.activeSessionId) {
+    // Active session not in pool — likely a fresh tab with no jsonl yet.
+    lines.push(`📌 当前: \`${input.activeSessionId.slice(0, 8)}\`  (新会话 · 待首条消息)`);
+    lines.push("");
+  }
+
+  if (otherEntries.length === 0) {
+    if (!currentEntry && !input.activeSessionId) {
+      lines.push("📜 还没有 claude session。点 [+ 新 session] 起一个。");
+    } else {
+      lines.push("📜 没有其他可切的 session。");
+    }
+  } else {
+    lines.push("📜 切到其他 session：");
+    lines.push("");
+    otherEntries.forEach((entry, idx) => {
       const code = idx + 1;
-      const active = entry.sessionId === input.activeSessionId;
-      const marker = active ? `${ACTIVE_DOT}${code}` : ` ${code}`;
       const when = formatActivityShort(entry.lastActivityMs);
       const sidShort = entry.sessionId.slice(0, 8);
-      lines.push(`${marker}  \`${sidShort}\`  ${when}  ${shortPreview(entry.preview)}`);
+      lines.push(` ${code}  \`${sidShort}\`  ${when}  ${shortPreview(entry.preview)}`);
     });
   }
 
@@ -169,18 +235,15 @@ export function renderPanel(input: RenderPanelInput): {
   }
   buttonRows.push({ type: "buttons", buttons: topButtons });
 
-  // Switch row: [●1] [2] [3] ... — only render buttons for actual entries.
-  if (entries.length > 0) {
+  // Switch row: [1] [2] [3] ... — others only; current is a header badge so
+  // no ●N variant is needed (we already filtered current out).
+  if (otherEntries.length > 0) {
     buttonRows.push({
       type: "buttons",
-      buttons: entries.map((entry, idx) => {
-        const code = idx + 1;
-        const active = entry.sessionId === input.activeSessionId;
-        return {
-          label: active ? `${ACTIVE_DOT}${code}` : `${code}`,
-          value: buildCallbackData(ACTION.switch, entry.sessionId),
-        };
-      }),
+      buttons: otherEntries.map((entry, idx) => ({
+        label: `${idx + 1}`,
+        value: buildCallbackData(ACTION.switch, entry.sessionId),
+      })),
     });
   }
 

@@ -69,6 +69,14 @@ export function buildPermHookEnv(params: {
       env.OPENCLAW_TURN_SOURCE_THREAD_ID = tid;
     }
   }
+  // Companion message ("session X waiting on approval, [👁 enter]") needs to
+  // hit Telegram bot API directly — gateway 'send' doesn't carry inline-keyboard
+  // payloads. Daemon ships TG_BOT_TOKEN via openclaw-start.sh, forward it on
+  // when the hook routes through a telegram chat.
+  const tgToken = process.env.TG_BOT_TOKEN?.trim();
+  if (tgToken && params.routing.channel === "telegram") {
+    env.TG_BOT_TOKEN = tgToken;
+  }
   return env;
 }
 

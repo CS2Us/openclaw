@@ -384,8 +384,11 @@ describe("hydrateChatStatesFromStore", () => {
     expect(restored).toBe(1);
     const state = getOrCreateChatState("telegram:42");
     expect(state.tabs.length).toBe(2);
-    expect(state.activeTabId).toBe("t1");
-    expect(getActiveTab(state)?.label).toBe("张三");
+    // Strict routing: persisted activeTabId is intentionally dropped during
+    // hydrate. User must explicitly re-enter a session via `/claude` after
+    // daemon restart.
+    expect(state.activeTabId).toBe(null);
+    expect(getActiveTab(state)).toBe(null);
   });
 
   it("migrates legacy v1 records (sessionId-only) into a single Tab 1", async () => {
@@ -409,7 +412,9 @@ describe("hydrateChatStatesFromStore", () => {
         lastUsedAt: 500,
       },
     ]);
-    expect(state.activeTabId).toBe("t1");
+    // Strict routing: even legacy single-session migration leaves activeTabId
+    // null so the user must explicitly re-enter the session.
+    expect(state.activeTabId).toBe(null);
   });
 
   it("legacy v1 record without sessionId migrates to empty (no tabs)", async () => {

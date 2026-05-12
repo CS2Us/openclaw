@@ -107,7 +107,7 @@ describe("createTelegramBot fetch abort", () => {
     const { clientFetch } = createWrappedTelegramClientFetch(fetchSpy as unknown as typeof fetch);
 
     const observedSignalPromise = clientFetch("https://api.telegram.org/bot123456:ABC/getUpdates");
-    await vi.advanceTimersByTimeAsync(45_000);
+    await vi.advanceTimersByTimeAsync(15_000);
     const observedSignal = (await observedSignalPromise) as AbortSignal;
 
     expect(observedSignal).toBeInstanceOf(AbortSignal);

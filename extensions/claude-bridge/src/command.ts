@@ -13,6 +13,7 @@ import {
   seedActiveTabLabel,
   updateChatStateAfterTurn,
 } from "./chat-state.js";
+import { writeFollowMarker } from "./follow-marker.js";
 import {
   resolveDefaults,
   resolveProjectCwd,
@@ -80,11 +81,14 @@ async function handleClaudeCommand(
     clearActiveTab(key);
     const state = getOrCreateChatState(key);
     const cwd = resolveProjectCwd(config);
+    // Cap candidates higher than the 3 rendered slots so renderPanel can drop
+    // the active session out of the switch list and still have 3 *others* to
+    // show. 4 = MAX_PANEL_ENTRIES + 1.
     const entries: PanelEntry[] = [];
     if (cwd) {
       const files = listSessionFiles(cwd);
       for (const f of files) {
-        if (entries.length >= 3) break;
+        if (entries.length >= 4) break;
         const info = readSessionInfo(f.jsonlPath);
         // Skip arbitrator / agent-internal sessions whose only user prompt
         // is the policy-resolver evaluation harness.
@@ -216,6 +220,14 @@ async function spawnClaudeForActiveTab(params: {
       })
     : null;
 
+  // Same engagement-marker write as fallthrough.ts: typing /claude <text>
+  // counts as the user being in this session, so perm-hook can skip the
+  // `[👁 进入]` nudge and surface the approval card inline.
+  const chatId = stripChannelPrefix(ctx.channel, key);
+  if (active?.sessionId) {
+    writeFollowMarker(chatId, active.sessionId);
+  }
+
   const result = await runClaude({
     bin: claudeBin,
     cwd: projectCwd,
@@ -228,6 +240,9 @@ async function spawnClaudeForActiveTab(params: {
   });
 
   updateChatStateAfterTurn(key, result.newSessionId);
+  if (result.newSessionId) {
+    writeFollowMarker(chatId, result.newSessionId);
+  }
 
   return { text: truncate(result.text, maxReplyChars) };
 }

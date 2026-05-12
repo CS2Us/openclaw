@@ -1,38 +1,65 @@
 import { describe, expect, it } from "vitest";
-import type { ChatState } from "./chat-state.js";
 import {
   ACTION,
   buildCallbackData,
   INTERACTIVE_NAMESPACE,
+  type PanelEntry,
   parseCallbackPayload,
-  renderTabManager,
+  renderPanel,
 } from "./tab-manager-ui.js";
 
-function emptyState(): ChatState {
-  return { tabs: [], activeTabId: null, lastUsedAt: 0 };
-}
-
 describe("parseCallbackPayload", () => {
-  it("parses switch:<tabId>", () => {
-    expect(parseCallbackPayload("sw:t3")).toEqual({ kind: "switch", tabId: "t3" });
+  it("parses switch:<sessionId>", () => {
+    expect(parseCallbackPayload("sw:abc12345-1111-2222-3333-444455556666")).toEqual({
+      kind: "switch",
+      sessionId: "abc12345-1111-2222-3333-444455556666",
+    });
   });
 
-  it("parses newTab", () => {
+  it("parses newTab / refresh / follow / unfollow", () => {
     expect(parseCallbackPayload("nw")).toEqual({ kind: "newTab" });
+    expect(parseCallbackPayload("rf")).toEqual({ kind: "refresh" });
+    expect(parseCallbackPayload("fo")).toEqual({ kind: "follow" });
+    expect(parseCallbackPayload("uf")).toEqual({ kind: "unfollow" });
+  });
+
+  it("parses enterAndFollow:<sessionId> — used by approval-companion buttons", () => {
+    expect(parseCallbackPayload("ef:abc12345-1111-2222-3333-444455556666")).toEqual({
+      kind: "enterAndFollow",
+      sessionId: "abc12345-1111-2222-3333-444455556666",
+    });
+  });
+
+  it("parses approveDecision:<approvalId>:<shortcode> — own approval card", () => {
+    expect(parseCallbackPayload("ad:abc12345-1111-2222-3333-444455556666:a1")).toEqual({
+      kind: "approveDecision",
+      approvalId: "abc12345-1111-2222-3333-444455556666",
+      decision: "allow-once",
+    });
+    expect(parseCallbackPayload("ad:xyz:aa")).toEqual({
+      kind: "approveDecision",
+      approvalId: "xyz",
+      decision: "allow-always",
+    });
+    expect(parseCallbackPayload("ad:xyz:dn")).toEqual({
+      kind: "approveDecision",
+      approvalId: "xyz",
+      decision: "deny",
+    });
+  });
+
+  it("rejects approveDecision with unknown shortcode / missing parts", () => {
+    expect(parseCallbackPayload("ad:xyz:xx")).toEqual({ kind: "unknown", raw: "ad:xyz:xx" });
+    expect(parseCallbackPayload("ad:xyz")).toEqual({ kind: "unknown", raw: "ad:xyz" });
+    expect(parseCallbackPayload("ad")).toEqual({ kind: "unknown", raw: "ad" });
   });
 
   // closeTab / resetAll / import are no longer rendered as buttons but the
   // parser still recognizes them so stale callback_data from older messages
   // in chat history still routes to a meaningful handler.
-  it("still parses closeTab:<tabId> for stale buttons", () => {
+  it("still parses legacy closeTab / resetAll / import for stale buttons", () => {
     expect(parseCallbackPayload("cl:t1")).toEqual({ kind: "closeTab", tabId: "t1" });
-  });
-
-  it("still parses resetAll for stale buttons", () => {
     expect(parseCallbackPayload("rs")).toEqual({ kind: "resetAll" });
-  });
-
-  it("still parses import:<sessionId> for stale buttons", () => {
     expect(parseCallbackPayload("im:5c4eb7ff-3fb9-4fde-be46-862bea97cf5f")).toEqual({
       kind: "import",
       sessionId: "5c4eb7ff-3fb9-4fde-be46-862bea97cf5f",
@@ -46,108 +73,160 @@ describe("parseCallbackPayload", () => {
 
 describe("buildCallbackData", () => {
   it("namespaces and joins parts", () => {
-    expect(buildCallbackData(ACTION.switch, "t3")).toBe(`${INTERACTIVE_NAMESPACE}:sw:t3`);
+    expect(buildCallbackData(ACTION.switch, "sid")).toBe(`${INTERACTIVE_NAMESPACE}:sw:sid`);
     expect(buildCallbackData(ACTION.newTab)).toBe(`${INTERACTIVE_NAMESPACE}:nw`);
+    expect(buildCallbackData(ACTION.enterAndFollow, "sid")).toBe(`${INTERACTIVE_NAMESPACE}:ef:sid`);
   });
 
-  it("stays well within Telegram's 64-byte callback_data budget", () => {
-    expect(buildCallbackData(ACTION.switch, "t99").length).toBeLessThan(64);
+  it("stays well within Telegram's 64-byte callback_data budget for full UUIDs", () => {
+    const uuid = "abc12345-1111-2222-3333-444455556666";
+    expect(buildCallbackData(ACTION.switch, uuid).length).toBeLessThan(64);
+    expect(buildCallbackData(ACTION.enterAndFollow, uuid).length).toBeLessThan(64);
   });
 });
 
-describe("renderTabManager", () => {
-  it("empty state shows hint text + only the [+ 新 session] row", () => {
-    const ui = renderTabManager(emptyState());
-    expect(ui.text).toContain("还没有会话");
-    // No tab-code rows, just the new-session row.
+function entry(partial: Partial<PanelEntry> & { sessionId: string }): PanelEntry {
+  return {
+    preview: "hello",
+    lastActivityMs: Date.now(),
+    ...partial,
+  };
+}
+
+describe("renderPanel", () => {
+  it("empty entries → hint text + only the [+ 新 session] row", () => {
+    const ui = renderPanel({ entries: [], activeSessionId: null });
+    expect(ui.text).toContain("还没有 claude session");
     expect(ui.interactive.blocks.length).toBe(1);
     const topRow = ui.interactive.blocks[0];
-    if (topRow?.type !== "buttons") {
-      throw new Error("expected buttons");
-    }
+    if (topRow?.type !== "buttons") throw new Error("expected buttons");
     expect(topRow.buttons.map((b) => b.value)).toEqual([buildCallbackData(ACTION.newTab)]);
   });
 
-  it("renders [+ 新 session] then a packed numbered switch row — and nothing else", () => {
-    const state: ChatState = {
-      tabs: [
-        { id: "t1", sessionId: "abc12345xx", label: "我叫张三", createdAt: 1, lastUsedAt: 1 },
-        { id: "t2", sessionId: null, label: "下一个会话", createdAt: 2, lastUsedAt: 2 },
-      ],
-      activeTabId: "t1",
-      lastUsedAt: 2,
-    };
-    const ui = renderTabManager(state);
-
-    // Text: numbered titles only, no `Tabs (N)：` header, no `— sid` suffix.
-    expect(ui.text).toMatch(/●1\.\s+\*\*我叫张三\*\*/);
-    expect(ui.text).toMatch(/2\.\s+\*\*下一个会话\*\*/);
-    expect(ui.text).not.toContain("—"); // no sid suffix
-    expect(ui.text).not.toContain("Tabs ("); // no header
-
-    // Buttons: [+ 新 session] row + one packed tab-code row. No danger row,
-    // no import row.
+  it("entries with no active → top row + numeric switch row, no follow button", () => {
+    const ui = renderPanel({
+      entries: [entry({ sessionId: "s1" }), entry({ sessionId: "s2" })],
+      activeSessionId: null,
+    });
     expect(ui.interactive.blocks.length).toBe(2);
-
     const topRow = ui.interactive.blocks[0];
-    const tabRow = ui.interactive.blocks[1];
-    if (topRow?.type !== "buttons" || tabRow?.type !== "buttons") {
-      throw new Error("expected buttons blocks");
+    const switchRow = ui.interactive.blocks[1];
+    if (topRow?.type !== "buttons" || switchRow?.type !== "buttons") {
+      throw new Error("expected buttons");
     }
+    // No follow button when no active session is selected.
     expect(topRow.buttons.map((b) => b.value)).toEqual([buildCallbackData(ACTION.newTab)]);
-    expect(tabRow.buttons.map((b) => b.label)).toEqual(["●1", "2"]);
-    expect(tabRow.buttons.map((b) => b.value)).toEqual([
-      buildCallbackData(ACTION.switch, "t1"),
-      buildCallbackData(ACTION.switch, "t2"),
+    expect(switchRow.buttons.map((b) => b.label)).toEqual(["1", "2"]);
+    expect(switchRow.buttons.map((b) => b.value)).toEqual([
+      buildCallbackData(ACTION.switch, "s1"),
+      buildCallbackData(ACTION.switch, "s2"),
     ]);
   });
 
-  it("no active tab → tab-code button has no dot prefix", () => {
-    const state: ChatState = {
-      tabs: [{ id: "t1", sessionId: null, label: "Tab 1", createdAt: 1, lastUsedAt: 1 }],
-      activeTabId: null,
-      lastUsedAt: 1,
-    };
-    const ui = renderTabManager(state);
-    expect(ui.interactive.blocks.length).toBe(2); // top + tab row
-    const tabRow = ui.interactive.blocks[1];
-    if (tabRow?.type !== "buttons") {
-      throw new Error("expected buttons");
-    }
-    expect(tabRow.buttons[0]?.label).toBe("1");
+  it("active session → top row gets [👁 实时流] button alongside [+ 新 session]", () => {
+    const ui = renderPanel({
+      entries: [entry({ sessionId: "s1" })],
+      activeSessionId: "s1",
+    });
+    const topRow = ui.interactive.blocks[0];
+    if (topRow?.type !== "buttons") throw new Error("expected buttons");
+    expect(topRow.buttons.map((b) => b.value)).toEqual([
+      buildCallbackData(ACTION.newTab),
+      buildCallbackData(ACTION.follow),
+    ]);
   });
 
-  it("packs more than TABS_PER_ROW tabs across multiple rows", () => {
-    const tabs: ChatState["tabs"] = [];
-    for (let i = 1; i <= 8; i++) {
-      tabs.push({ id: `t${i}`, sessionId: null, label: `Tab ${i}`, createdAt: i, lastUsedAt: i });
-    }
-    const state: ChatState = { tabs, activeTabId: "t1", lastUsedAt: 8 };
-    const ui = renderTabManager(state);
-    // top row + tab-row1(6) + tab-row2(2) — no danger or import rows.
-    expect(ui.interactive.blocks.length).toBe(3);
-    const tabRow1 = ui.interactive.blocks[1];
-    const tabRow2 = ui.interactive.blocks[2];
-    if (tabRow1?.type !== "buttons" || tabRow2?.type !== "buttons") {
-      throw new Error("expected buttons");
-    }
-    expect(tabRow1.buttons.map((b) => b.label)).toEqual(["●1", "2", "3", "4", "5", "6"]);
-    expect(tabRow2.buttons.map((b) => b.label)).toEqual(["7", "8"]);
+  it("followActive → top row replaces 实时流 with [⏹ 停止流]", () => {
+    const ui = renderPanel({
+      entries: [entry({ sessionId: "s1" })],
+      activeSessionId: "s1",
+      followActive: true,
+    });
+    const topRow = ui.interactive.blocks[0];
+    if (topRow?.type !== "buttons") throw new Error("expected buttons");
+    expect(topRow.buttons.map((b) => b.value)).toEqual([
+      buildCallbackData(ACTION.newTab),
+      buildCallbackData(ACTION.unfollow),
+    ]);
   });
 
-  it("long titles stay in text section; tab-code buttons stay one-or-two chars", () => {
-    const long = "x".repeat(40);
-    const state: ChatState = {
-      tabs: [{ id: "t1", sessionId: null, label: long, createdAt: 1, lastUsedAt: 1 }],
-      activeTabId: "t1",
-      lastUsedAt: 1,
-    };
-    const ui = renderTabManager(state);
-    const tabRow = ui.interactive.blocks[1];
-    if (tabRow?.type !== "buttons") {
-      throw new Error("expected buttons");
-    }
-    expect(tabRow.buttons[0]?.label).toBe("●1");
-    expect(ui.text).toContain(long);
+  it("active session is split out as 📌 header; switch row shows only OTHERS", () => {
+    const ui = renderPanel({
+      entries: [
+        entry({ sessionId: "s1", preview: "active prompt" }),
+        entry({ sessionId: "s2", preview: "other prompt" }),
+      ],
+      activeSessionId: "s1",
+    });
+    // Header line shows the active session.
+    expect(ui.text).toContain("📌 当前:");
+    expect(ui.text).toContain("active prompt");
+    // Switch row only contains buttons for OTHER sessions, plain numbers, no
+    // ● marker.
+    const switchRow = ui.interactive.blocks[1];
+    if (switchRow?.type !== "buttons") throw new Error("expected buttons");
+    expect(switchRow.buttons.map((b) => b.label)).toEqual(["1"]);
+    expect(switchRow.buttons.map((b) => b.value)).toEqual([buildCallbackData(ACTION.switch, "s2")]);
+  });
+
+  it("renders 'no other session' note when active is the only one in pool", () => {
+    const ui = renderPanel({
+      entries: [entry({ sessionId: "only" })],
+      activeSessionId: "only",
+    });
+    expect(ui.text).toContain("📌 当前:");
+    expect(ui.text).toContain("没有其他可切的 session");
+    // Top row only — no switch row when there are no others.
+    expect(ui.interactive.blocks.length).toBe(1);
+  });
+
+  it("shows active-as-header even when the session is not in pool entries", () => {
+    const ui = renderPanel({
+      entries: [entry({ sessionId: "s2" })],
+      activeSessionId: "fresh-session-not-in-pool",
+    });
+    expect(ui.text).toContain("📌 当前:");
+    expect(ui.text).toContain("(新会话 · 待首条消息)");
+    const switchRow = ui.interactive.blocks[1];
+    if (switchRow?.type !== "buttons") throw new Error("expected buttons");
+    expect(switchRow.buttons.map((b) => b.label)).toEqual(["1"]);
+  });
+
+  it("caps at 3 entries (MAX_PANEL_ENTRIES)", () => {
+    const ui = renderPanel({
+      entries: [
+        entry({ sessionId: "s1" }),
+        entry({ sessionId: "s2" }),
+        entry({ sessionId: "s3" }),
+        entry({ sessionId: "s4" }),
+      ],
+      activeSessionId: null,
+    });
+    const switchRow = ui.interactive.blocks[1];
+    if (switchRow?.type !== "buttons") throw new Error("expected buttons");
+    expect(switchRow.buttons.length).toBe(3);
+  });
+
+  it("each line shows sid-8-char prefix before the preview", () => {
+    const ui = renderPanel({
+      entries: [
+        entry({
+          sessionId: "abc12345-1111-2222-3333-444455556666",
+          preview: "test prompt",
+        }),
+      ],
+      activeSessionId: null,
+    });
+    expect(ui.text).toContain("`abc12345`");
+    expect(ui.text).toContain("test prompt");
+  });
+
+  it("optional header is rendered above the listing", () => {
+    const ui = renderPanel({
+      entries: [entry({ sessionId: "s1" })],
+      activeSessionId: "s1",
+      header: "📍 切到 session test",
+    });
+    expect(ui.text.startsWith("📍 切到 session test")).toBe(true);
   });
 });

@@ -1,4 +1,12 @@
-export const TELEGRAM_GET_UPDATES_REQUEST_TIMEOUT_MS = 45_000;
+// Client-side hard abort for getUpdates. 15s = grammY long-poll (10s) +
+// generous RTT slack. Was 45s — through a Clash-style transparent proxy
+// that silently drops idle TCP after 30-60s, the connection hangs invisibly
+// and the daemon waits the full 45s before aborting, then retries. Two such
+// failed cycles consume ~90s, which is exactly the gap we saw between
+// `plugin.approval.request` and the callback finally arriving (way past the
+// 110s server-side approval timeout). 15s recovers within one approval
+// window even under proxy weather.
+export const TELEGRAM_GET_UPDATES_REQUEST_TIMEOUT_MS = 15_000;
 const TELEGRAM_OUTBOUND_TEXT_REQUEST_TIMEOUT_MS = 60_000;
 
 const TELEGRAM_REQUEST_TIMEOUTS_MS = {

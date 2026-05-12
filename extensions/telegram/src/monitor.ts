@@ -32,8 +32,19 @@ export function createTelegramRunnerOptions(cfg: OpenClawConfig): RunOptions<unk
     },
     runner: {
       fetch: {
-        // Match grammY defaults
-        timeout: 30,
+        // 10s long-poll instead of grammY's 30s default. Reason: when the
+        // bot egress goes through a transparent / forward proxy (e.g. Clash
+        // on macOS, common dev setup behind the GFW), idle TCP connections
+        // get silently dropped after ~30-60s. A 30s long-poll hits that
+        // window dead-center and stalls every 2-3 minutes — the daemon
+        // logs the stall + restart cycle (`[telegram] Polling stall
+        // detected (no completed getUpdates for 134s); forcing restart`)
+        // and callback queries pile up at Telegram, arriving too late
+        // (answerCallbackQuery: "query is too old") after the rebuild.
+        // 10s keeps each cycle well under any reasonable idle-drop window
+        // at the cost of marginally more polling overhead (~6 vs ~2 calls
+        // per minute when chat is idle — negligible).
+        timeout: 10,
         // Request reactions without dropping default update types.
         allowed_updates: resolveTelegramAllowedUpdates(),
       },

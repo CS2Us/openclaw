@@ -17,8 +17,11 @@ describe("createTelegramRunnerOptions", () => {
     expect(opts.runner?.maxRetryTime).toBe(0);
   });
 
-  it("keeps grammy's getUpdates timeout at 30s (matches grammy default)", () => {
+  it("pins getUpdates timeout to 10s to survive Clash-style proxy idle drops", () => {
+    // 30s (grammy default) gets dropped by transparent proxies that idle-kill
+    // TCP after 30-60s, causing periodic polling stalls. See monitor.ts for
+    // the rationale.
     const opts = createTelegramRunnerOptions(minimalCfg);
-    expect(opts.runner?.fetch?.timeout).toBe(30);
+    expect(opts.runner?.fetch?.timeout).toBe(10);
   });
 });

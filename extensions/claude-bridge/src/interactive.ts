@@ -23,6 +23,7 @@ import {
   resetChatState,
   stopActiveFollow,
 } from "./chat-state.js";
+import { getDaemonGatewayClient } from "./daemon-gateway-client.js";
 import { normalizeTelegramChatId, notifyFollowEvent, startAndRegisterFollow } from "./follow.js";
 import { type ClaudeBridgeConfig, resolveProjectCwd } from "./handler.js";
 import {
@@ -127,6 +128,37 @@ export function createTabManagerInteractiveHandler(options?: {
           useReply = true;
           break;
         }
+        case "enterAndFollow": {
+          // Originates from the perm-hook approval-companion message: one-tap
+          // "step into this session + start streaming + show the last turn so
+          // I understand what claude was doing when the approval fired".
+          // Standard openclaw approval card with allow/deny lands as a
+          // separate message right after.
+          if (!cwd) {
+            header = "⚠️ cwd 解析失败，无法进入 session";
+            useReply = true;
+            break;
+          }
+          stopActiveFollow(key);
+          importSessionAsTab(key, parsed.sessionId);
+          header = buildSwitchHeader(cwd, parsed.sessionId);
+          const handle = startAndRegisterFollow({
+            chatKey: key,
+            sessionId: parsed.sessionId,
+            cwd,
+            telegramChatId: tgChatId,
+            telegramBotToken: tgToken,
+          });
+          if (handle) {
+            await notifyFollowEvent(
+              tgToken,
+              tgChatId,
+              `📡 follow 中 · session \`${parsed.sessionId.slice(0, 8)}\` —— 等 perm-hook 抬手发卡片`,
+            );
+          }
+          useReply = true;
+          break;
+        }
         case "unfollow": {
           const stopped = stopActiveFollow(key);
           if (stopped) {
@@ -141,6 +173,31 @@ export function createTabManagerInteractiveHandler(options?: {
           }
           useReply = true;
           break;
+        }
+        case "approveDecision": {
+          // Our own approval card from perm-hook.cjs. Resolve the openclaw
+          // approval state directly via a loopback WS client — no file IPC,
+          // no perm-hook polling. perm-hook's `plugin.approval.waitDecision`
+          // returns instantly when the gateway emits the resolved event,
+          // saving ~150-300ms vs the old file-poll path.
+          //
+          // Fire-and-forget: we don't await because the user's click ack
+          // shouldn't block on the resolve round-trip. If the resolve fails,
+          // perm-hook eventually hits its 110s server-side timeout and emits
+          // deny to claude (safe fallback).
+          const client = getDaemonGatewayClient();
+          if (client) {
+            void client.resolveApproval(parsed.approvalId, parsed.decision).catch((err) => {
+              process.stderr.write(`[claude-bridge] resolveApproval failed: ${String(err)}\n`);
+            });
+          } else {
+            process.stderr.write(
+              "[claude-bridge] daemon gateway client unavailable (no OPENCLAW_GATEWAY_PASSWORD?); approval will time out\n",
+            );
+          }
+          // No reply or panel re-render: perm-hook will edit the original
+          // approval card to show the resolution once waitDecision returns.
+          return { handled: true };
         }
         // 以下三个 legacy action 仍解析但只 silently refresh，
         // chat 历史中的旧 button 不会报错
@@ -165,7 +222,10 @@ export function createTabManagerInteractiveHandler(options?: {
       if (cwd) {
         const files = listSessionFiles(cwd);
         for (const f of files) {
-          if (entries.length >= 3) break;
+          // Same +1 over MAX_PANEL_ENTRIES as command.ts: renderPanel drops
+          // the active session from the switch list, so we need a spare to
+          // still fill 3 *other* slots.
+          if (entries.length >= 4) break;
           const info = readSessionInfo(f.jsonlPath);
           if (info.preview && info.preview.startsWith("判断以下 tool call")) continue;
           if (!info.preview) continue;

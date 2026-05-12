@@ -2,6 +2,7 @@ import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { setClaudeBridgeRuntime } from "./src/chat-state-store.js";
 import { hydrateChatStatesFromStore } from "./src/chat-state.js";
 import { createClaudeCommand } from "./src/command.js";
+import { getDaemonGatewayClient } from "./src/daemon-gateway-client.js";
 import { createClaudeBridgeFallthroughHandler } from "./src/fallthrough.js";
 import { createTabManagerInteractiveHandler } from "./src/interactive.js";
 
@@ -29,5 +30,11 @@ export default definePluginEntry({
     api.registerInteractiveHandler(
       createTabManagerInteractiveHandler({ pluginConfig: api.pluginConfig }),
     );
+    // Eagerly establish the loopback WS connection so the `operator.approvals`
+    // scope is registered before any perm-hook fires a plugin.approval.request.
+    // Without this, openclaw treats the approval as routeless and auto-expires
+    // (decision=null → perm-hook emits deny instantly). See
+    // src/daemon-gateway-client.ts comment for full reasoning.
+    getDaemonGatewayClient()?.connectEagerly();
   },
 });
