@@ -4,6 +4,7 @@ import { hydrateChatStatesFromStore } from "./src/chat-state.js";
 import { createClaudeCommand } from "./src/command.js";
 import { getDaemonGatewayClient } from "./src/daemon-gateway-client.js";
 import { createClaudeBridgeFallthroughHandler } from "./src/fallthrough.js";
+import { notifyAndClearStaleFollowMarkers } from "./src/follow-marker.js";
 import { createTabManagerInteractiveHandler } from "./src/interactive.js";
 
 export default definePluginEntry({
@@ -36,5 +37,12 @@ export default definePluginEntry({
     // (decision=null → perm-hook emits deny instantly). See
     // src/daemon-gateway-client.ts comment for full reasoning.
     getDaemonGatewayClient()?.connectEagerly();
+
+    // Stale follow markers left over from a previous daemon process: notify
+    // each affected chat that its stream stopped, then delete the marker so
+    // perm-hook is back to "no-follow" state. Best-effort.
+    void notifyAndClearStaleFollowMarkers({
+      tgBotToken: process.env.TG_BOT_TOKEN,
+    }).catch(() => {});
   },
 });

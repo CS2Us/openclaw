@@ -55,3 +55,66 @@ export function chatIdFromChatKey(chatKey: string): string {
   const colon = chatKey.indexOf(":");
   return colon === -1 ? chatKey : chatKey.slice(colon + 1);
 }
+
+/**
+ * On daemon restart the in-memory follow loops are gone, but the filesystem
+ * markers still live (perm-hook would observe them and think the user is in
+ * follow). Call at plugin init: scan the dir, notify each affected chat that
+ * its stream stopped, then delete the marker so perm-hook is back to "no
+ * follow" state. Best-effort — errors are swallowed.
+ */
+export async function notifyAndClearStaleFollowMarkers(opts: {
+  tgBotToken: string | undefined;
+}): Promise<number> {
+  const token = opts.tgBotToken?.trim();
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(MARKER_DIR);
+  } catch {
+    return 0; // dir doesn't exist yet — nothing to clean
+  }
+
+  let cleared = 0;
+  for (const name of entries) {
+    // Filename shape: `<chatId>-<sessionId>` where sessionId is a UUID with
+    // 4 hyphens. The chatId portion is everything before the first hyphen.
+    const dash = name.indexOf("-");
+    if (dash <= 0) continue;
+    const chatId = name.slice(0, dash);
+    const sessionId = name.slice(dash + 1);
+
+    if (token && /^-?\d+$/.test(chatId)) {
+      // Best-effort notice; doesn't block cleanup if it fails.
+      void sendStaleFollowNotice(token, chatId, sessionId).catch(() => {});
+    }
+    try {
+      fs.unlinkSync(path.join(MARKER_DIR, name));
+      cleared++;
+    } catch {
+      // best-effort
+    }
+  }
+  return cleared;
+}
+
+async function sendStaleFollowNotice(
+  token: string,
+  chatId: string,
+  sessionId: string,
+): Promise<void> {
+  const sidShort = sessionId.slice(0, 8);
+  const text =
+    `⏹ 推流已关闭（daemon 重启）\n` +
+    `上次在 session \`${sidShort}\`。发 /claude 看面板重新选 session。`;
+  await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      chat_id: chatId,
+      text,
+      parse_mode: "Markdown",
+      disable_web_page_preview: true,
+    }),
+    signal: AbortSignal.timeout(8_000),
+  });
+}

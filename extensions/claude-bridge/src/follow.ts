@@ -74,9 +74,19 @@ export function startFollow(opts: FollowOptions): FollowHandle | null {
       .filter((line) => line.length > 0);
     for (const line of lines) {
       if (stopped) return;
-      const formatted = formatJsonlEvent(line);
-      if (!formatted) continue;
-      await sendTelegramMessage(opts.telegramBotToken, opts.telegramChatId, formatted);
+      const parsed = formatJsonlEvent(line);
+      if (!parsed) continue;
+      // Side effect: any assistant message that contains a tool_use block
+      // triggers a `typing` chat action so the user can see claude is
+      // actively working without us renaming/spamming the stream with
+      // [🛠 ToolName] placeholders. Telegram surfaces "typing..." in the
+      // chat header for ~5s; consecutive tool_uses naturally re-extend it.
+      if (parsed.hasToolUse) {
+        await sendTelegramTypingAction(opts.telegramBotToken, opts.telegramChatId);
+      }
+      if (parsed.text) {
+        await sendTelegramMessage(opts.telegramBotToken, opts.telegramChatId, parsed.text);
+      }
     }
   };
 
@@ -120,11 +130,19 @@ export function startAndRegisterFollow(opts: FollowOptions): FollowHandle | null
   return handle;
 }
 
+type FormattedEvent = { text: string | null; hasToolUse: boolean };
+
 /**
- * Parse a jsonl line and format as Telegram message text.
- * Returns null when the event is not user-facing (system/meta/tool_result).
+ * Parse a jsonl line. Returns `null` only when the event is wholly irrelevant
+ * (system/meta/tool_result). Otherwise returns `{text, hasToolUse}`:
+ *  - `text` is the user-facing message to send into chat (or null if the
+ *    event has no conversational content — pure tool_use bursts, etc.).
+ *  - `hasToolUse` is true when the assistant event contained at least one
+ *    tool_use block. The caller fires a Telegram `sendChatAction(typing)`
+ *    so the user can see claude is working, without us spamming the stream
+ *    with `[🛠 ToolName]` placeholders (those duplicate the approval card).
  */
-function formatJsonlEvent(line: string): string | null {
+function formatJsonlEvent(line: string): FormattedEvent | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(line);
@@ -141,7 +159,10 @@ function formatJsonlEvent(line: string): string | null {
     const text = extractUserText(obj);
     const cleaned = stripWrapperTags(text).trim();
     if (!cleaned) return null;
-    return `👤 你：\n${truncate(cleaned, MAX_TELEGRAM_TEXT - 10)}`;
+    return {
+      text: `👤 你：\n${truncate(cleaned, MAX_TELEGRAM_TEXT - 10)}`,
+      hasToolUse: false,
+    };
   }
 
   if (type === "assistant") {
@@ -150,18 +171,22 @@ function formatJsonlEvent(line: string): string | null {
     const content = (message as Record<string, unknown>)["content"];
     if (!Array.isArray(content)) return null;
     const parts: string[] = [];
+    let hasToolUse = false;
     for (const c of content) {
       if (typeof c !== "object" || c === null) continue;
       const block = c as Record<string, unknown>;
       if (block["type"] === "text" && typeof block["text"] === "string") {
         parts.push(block["text"]);
-      } else if (block["type"] === "tool_use" && typeof block["name"] === "string") {
-        parts.push(`[🛠 ${block["name"]}]`);
+      } else if (block["type"] === "tool_use") {
+        hasToolUse = true;
       }
     }
     const text = parts.join("\n").trim();
-    if (!text) return null;
-    return `🤖 claude：\n${truncate(text, MAX_TELEGRAM_TEXT - 12)}`;
+    if (!text && !hasToolUse) return null;
+    return {
+      text: text ? `🤖 claude：\n${truncate(text, MAX_TELEGRAM_TEXT - 12)}` : null,
+      hasToolUse,
+    };
   }
 
   return null;
@@ -241,6 +266,26 @@ export async function notifyFollowEvent(
   text: string,
 ): Promise<void> {
   await sendTelegramMessage(token, chatId, text);
+}
+
+/**
+ * Best-effort `sendChatAction(typing)` — shows "BillyMacClaudeBot is
+ * typing..." in the chat header for ~5s. Used to indicate claude is mid-
+ * tool-call without us materializing a chat message for every step.
+ * Errors are swallowed; follow stream keeps going.
+ */
+async function sendTelegramTypingAction(token: string, chatId: string): Promise<void> {
+  if (!token) return;
+  try {
+    await fetch(`https://api.telegram.org/bot${token}/sendChatAction`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ chat_id: chatId, action: "typing" }),
+      signal: AbortSignal.timeout(5_000),
+    });
+  } catch {
+    // best-effort; the action indicator is cosmetic
+  }
 }
 
 /**
