@@ -9,18 +9,34 @@
 // is fine because TS is structural; if the channel ever broadens the context
 // shape, our local type just gets stale and the handler keeps compiling.
 
+import path from "node:path";
 import type { InteractiveReplyBlock } from "openclaw/plugin-sdk/interactive-runtime";
 import type { PluginInteractiveHandlerRegistration } from "openclaw/plugin-sdk/plugin-runtime";
 import {
   chatStateKey,
   closeTab,
   createNewTab,
+  getActiveFollow,
+  getActiveTab,
   getOrCreateChatState,
   importSessionAsTab,
   resetChatState,
-  switchActiveTab,
+  stopActiveFollow,
 } from "./chat-state.js";
-import { INTERACTIVE_NAMESPACE, parseCallbackPayload, renderTabManager } from "./tab-manager-ui.js";
+import { normalizeTelegramChatId, notifyFollowEvent, startAndRegisterFollow } from "./follow.js";
+import { type ClaudeBridgeConfig, resolveProjectCwd } from "./handler.js";
+import {
+  listSessionFiles,
+  readLastTurn,
+  readSessionInfo,
+  sessionsDir,
+} from "./session-discovery.js";
+import {
+  INTERACTIVE_NAMESPACE,
+  type PanelEntry,
+  parseCallbackPayload,
+  renderPanel,
+} from "./tab-manager-ui.js";
 
 type TelegramButton = {
   text: string;
@@ -34,13 +50,19 @@ type TelegramInteractiveCtx = {
   callback: { payload: string; chatId: string };
   auth: { isAuthorizedSender: boolean };
   respond: {
+    // editMessage 用于在原 panel 上编辑（refresh / closeTab / 静默操作）
     editMessage: (params: { text: string; buttons?: TelegramButtons }) => Promise<void>;
+    // reply 用于发**新** panel 消息（switch / newTab —— 体感"开新聊天界面"）
+    // 实际由 telegram channel runtime 注入，类型只声明我们用到的部分（claude-bridge
+    // 不能 import telegram extension barrel，结构性 mirror 即可）
+    reply: (params: { text: string; buttons?: TelegramButtons }) => Promise<void>;
   };
 };
 
-export function createTabManagerInteractiveHandler(_options?: {
+export function createTabManagerInteractiveHandler(options?: {
   pluginConfig?: unknown;
 }): PluginInteractiveHandlerRegistration {
+  const config = (options?.pluginConfig ?? {}) as ClaudeBridgeConfig;
   return {
     channel: "telegram",
     namespace: INTERACTIVE_NAMESPACE,
@@ -55,16 +77,73 @@ export function createTabManagerInteractiveHandler(_options?: {
 
       const key = chatStateKey("telegram", t.callback.chatId);
       const parsed = parseCallbackPayload(t.callback.payload);
-      // closeTab / resetAll / import are no longer rendered as buttons but the
-      // parser still recognizes them so stale callback_data from old messages
-      // in chat history still works (defensive — see file header).
+      const cwd = resolveProjectCwd(config);
+      const tgToken = process.env.TG_BOT_TOKEN ?? "";
+      const tgChatId = normalizeTelegramChatId(t.callback.chatId);
+      let header: string | undefined;
+      // 是否走 reply 发新 panel（switch / newTab）vs editMessage 原地刷（refresh）
+      let useReply = false;
+
       switch (parsed.kind) {
         case "switch":
-          switchActiveTab(key, parsed.tabId);
+          // 切换会话隐式取消旧 follow（旧 stream 跟当前 session 不一致了）
+          stopActiveFollow(key);
+          importSessionAsTab(key, parsed.sessionId);
+          header = cwd
+            ? buildSwitchHeader(cwd, parsed.sessionId)
+            : `📍 切到 session \`${parsed.sessionId.slice(0, 8)}\``;
+          useReply = true;
           break;
         case "newTab":
+          stopActiveFollow(key);
           createNewTab(key);
+          header = "📍 已起新 session（往下打字开始对话）";
+          useReply = true;
           break;
+        case "follow": {
+          const active = getActiveTab(getOrCreateChatState(key));
+          if (!active?.sessionId || !cwd) {
+            header = "⚠️ 没有选中的 session 或 cwd 解析失败，无法 follow";
+            useReply = true;
+            break;
+          }
+          const handle = startAndRegisterFollow({
+            chatKey: key,
+            sessionId: active.sessionId,
+            cwd,
+            telegramChatId: tgChatId,
+            telegramBotToken: tgToken,
+          });
+          if (handle) {
+            await notifyFollowEvent(
+              tgToken,
+              tgChatId,
+              `📡 开始 follow session \`${active.sessionId.slice(0, 8)}\`（30 分钟上限，期间该 session 新事件实时推过来）`,
+            );
+            header = "📡 follow 中";
+          } else {
+            header = "⚠️ follow 启动失败（jsonl 不存在？）";
+          }
+          useReply = true;
+          break;
+        }
+        case "unfollow": {
+          const stopped = stopActiveFollow(key);
+          if (stopped) {
+            await notifyFollowEvent(
+              tgToken,
+              tgChatId,
+              `⏹ 已停止 follow（sid=\`${stopped.sessionId.slice(0, 8)}\`）`,
+            );
+            header = "⏹ follow 已停";
+          } else {
+            header = "ℹ️ 当前没有 follow 在跑";
+          }
+          useReply = true;
+          break;
+        }
+        // 以下三个 legacy action 仍解析但只 silently refresh，
+        // chat 历史中的旧 button 不会报错
         case "closeTab":
           closeTab(key, parsed.tabId);
           break;
@@ -76,16 +155,40 @@ export function createTabManagerInteractiveHandler(_options?: {
           break;
         case "refresh":
         case "unknown":
-          // No state mutation; just re-render so the user sees the UI is alive.
           break;
       }
 
+      // 读 pool 当前 top 3 重新渲染面板（跟 command.ts 共享筛选逻辑：
+      // 跳过 arbitrator / 空 preview 的污染 session）
       const state = getOrCreateChatState(key);
-      const refreshed = renderTabManager(state);
-      await t.respond.editMessage({
+      const entries: PanelEntry[] = [];
+      if (cwd) {
+        const files = listSessionFiles(cwd);
+        for (const f of files) {
+          if (entries.length >= 3) break;
+          const info = readSessionInfo(f.jsonlPath);
+          if (info.preview && info.preview.startsWith("判断以下 tool call")) continue;
+          if (!info.preview) continue;
+          entries.push({
+            sessionId: f.sessionId,
+            preview: info.preview,
+            lastActivityMs: info.lastEventMs ?? f.mtimeMs,
+          });
+        }
+      }
+      const activeSessionId = getActiveTab(state)?.sessionId ?? null;
+      const followActive = getActiveFollow(key) !== undefined;
+      const refreshed = renderPanel({ entries, activeSessionId, header, followActive });
+
+      const respondParams = {
         text: refreshed.text,
         buttons: interactiveBlocksToTelegramButtons(refreshed.interactive.blocks),
-      });
+      };
+      if (useReply) {
+        await t.respond.reply(respondParams);
+      } else {
+        await t.respond.editMessage(respondParams);
+      }
 
       return { handled: true };
     },
@@ -121,4 +224,54 @@ function interactiveBlocksToTelegramButtons(
 
 function isTelegramStyle(s: unknown): s is TelegramButton["style"] {
   return s === "danger" || s === "success" || s === "primary";
+}
+
+/**
+ * Build the rich header shown above the panel after a /claude session switch.
+ * Surfaces: session title (your first prompt), age + event count, and the
+ * "last turn" snippet (your most recent question + claude's most recent reply
+ * to that session). Lets the user see what context they're stepping into
+ * instead of just a hash.
+ */
+function buildSwitchHeader(cwd: string, sessionId: string): string {
+  const jsonlPath = path.join(sessionsDir(cwd), `${sessionId}.jsonl`);
+  const info = readSessionInfo(jsonlPath);
+  const turn = readLastTurn(jsonlPath);
+
+  const lines: string[] = [];
+  const title = info.preview ?? sessionId.slice(0, 8);
+  lines.push(`📍 切到 session: ${title}`);
+
+  if (info.lastEventMs != null) {
+    const ageText = formatAge(info.lastEventMs);
+    lines.push(`📅 ${ageText} · ${info.eventCount} 条事件 · sid=\`${sessionId.slice(0, 8)}\``);
+  }
+
+  if (turn.lastUserText || turn.lastAssistantText) {
+    lines.push("");
+    lines.push("最近一段：");
+    if (turn.lastUserText) {
+      lines.push(`> 你：${truncate(turn.lastUserText, 150)}`);
+    }
+    if (turn.lastAssistantText) {
+      lines.push(`> claude：${truncate(turn.lastAssistantText, 250)}`);
+    }
+  }
+
+  return lines.join("\n");
+}
+
+function formatAge(ms: number, nowMs: number = Date.now()): string {
+  const diffMin = Math.max(0, Math.round((nowMs - ms) / 60_000));
+  if (diffMin < 1) return "刚才";
+  if (diffMin < 60) return `${diffMin} 分钟前`;
+  const diffHr = Math.round(diffMin / 60);
+  if (diffHr < 24) return `${diffHr} 小时前`;
+  const diffDay = Math.round(diffHr / 24);
+  return `${diffDay} 天前`;
+}
+
+function truncate(s: string, max: number): string {
+  const collapsed = s.replace(/\s+/g, " ").trim();
+  return collapsed.length > max ? `${collapsed.slice(0, max)}…` : collapsed;
 }

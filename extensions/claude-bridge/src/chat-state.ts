@@ -193,6 +193,57 @@ export function switchActiveTab(key: ChatStateKey, tabId: TabId): boolean {
   return true;
 }
 
+// ---------------------------------------------------------------------------
+// Follow state — per-chat "tail -f" of a session jsonl, streamed to Telegram.
+// Held in-memory only; daemon restart clears all follows. Handle is opaque
+// from chat-state's perspective; follow.ts owns the interval/timeout cleanup.
+// ---------------------------------------------------------------------------
+
+export type FollowHandle = {
+  sessionId: string;
+  startedAt: number;
+  cleanup: () => void;
+};
+
+const ACTIVE_FOLLOWS = new Map<ChatStateKey, FollowHandle>();
+
+export function getActiveFollow(key: ChatStateKey): FollowHandle | undefined {
+  return ACTIVE_FOLLOWS.get(key);
+}
+
+export function registerFollow(key: ChatStateKey, handle: FollowHandle): void {
+  // Stop any previous follow for this chat — only one stream at a time.
+  stopActiveFollow(key);
+  ACTIVE_FOLLOWS.set(key, handle);
+}
+
+export function stopActiveFollow(key: ChatStateKey): FollowHandle | undefined {
+  const existing = ACTIVE_FOLLOWS.get(key);
+  if (!existing) return undefined;
+  ACTIVE_FOLLOWS.delete(key);
+  try {
+    existing.cleanup();
+  } catch {
+    // best-effort
+  }
+  return existing;
+}
+
+/**
+ * Clear the active tab pointer without touching the tab list. Used by /claude
+ * (no args) to render the panel in "no session selected" state — user must
+ * explicitly click [N] or [+ 新 session] before plain DMs route anywhere.
+ */
+export function clearActiveTab(key: ChatStateKey): void {
+  const state = getOrCreateChatState(key);
+  if (state.activeTabId === null) {
+    return;
+  }
+  state.activeTabId = null;
+  state.lastUsedAt = Date.now();
+  persistChatState(key, snapshot(state));
+}
+
 export function closeTab(key: ChatStateKey, tabId: TabId): boolean {
   const state = getOrCreateChatState(key);
   const idx = state.tabs.findIndex((t) => t.id === tabId);

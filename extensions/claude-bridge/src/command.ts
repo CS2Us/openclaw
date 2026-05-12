@@ -5,6 +5,7 @@ import type {
 } from "openclaw/plugin-sdk/plugin-entry";
 import {
   adoptChatStateSession,
+  clearActiveTab,
   createNewTab,
   getActiveTab,
   getOrCreateChatState,
@@ -25,8 +26,8 @@ import {
   resolveGatewayUrl,
   resolvePermHookScriptPath,
 } from "./perm-hook-spawn.js";
-import { findMostRecentSession } from "./session-discovery.js";
-import { renderTabManager } from "./tab-manager-ui.js";
+import { findMostRecentSession, listSessionFiles, readSessionInfo } from "./session-discovery.js";
+import { type PanelEntry, renderPanel } from "./tab-manager-ui.js";
 
 export function createClaudeCommand(options: {
   pluginConfig?: unknown;
@@ -66,15 +67,44 @@ async function handleClaudeCommand(
     return handleNewTab(key);
   }
 
-  // `/claude` (no args): show the tab manager — list of session titles +
-  // [+ 新 session] + numbered switch buttons. Tabs auto-evict at MAX_TABS.
+  // `/claude` (no args): show the pool-driven panel — top-3 sessions by
+  // jsonl mtime (across all claude session origins: IDE / CLI / overnight /
+  // bot-spawned) + [+ 新 session] + numbered switch buttons. Excludes
+  // policy-resolver arbitrator sessions (they pollute the pool — each tool
+  // call leaves a tiny one-shot jsonl that would otherwise rank at top).
+  //
+  // **不进任何对话**：每次 /claude 清空 activeTabId。用户必须显式点 [N] 或
+  // [+ 新 session] 才能开始对话——避免"我打开 panel 看一眼，结果发消息进了
+  // 上次那条" 的隐式跳路由。
   if (!args) {
+    clearActiveTab(key);
     const state = getOrCreateChatState(key);
-    const ui = renderTabManager(state);
-    return {
-      text: ui.text,
-      interactive: ui.interactive,
-    };
+    const cwd = resolveProjectCwd(config);
+    const entries: PanelEntry[] = [];
+    if (cwd) {
+      const files = listSessionFiles(cwd);
+      for (const f of files) {
+        if (entries.length >= 3) break;
+        const info = readSessionInfo(f.jsonlPath);
+        // Skip arbitrator / agent-internal sessions whose only user prompt
+        // is the policy-resolver evaluation harness.
+        if (info.preview && info.preview.startsWith("判断以下 tool call")) {
+          continue;
+        }
+        // Skip empty / aiTitle-only sessions (no real user prompt found).
+        if (!info.preview) {
+          continue;
+        }
+        entries.push({
+          sessionId: f.sessionId,
+          preview: info.preview,
+          lastActivityMs: info.lastEventMs ?? f.mtimeMs,
+        });
+      }
+    }
+    const activeSessionId = getActiveTab(state)?.sessionId ?? null;
+    const ui = renderPanel({ entries, activeSessionId });
+    return { text: ui.text, interactive: ui.interactive };
   }
 
   // `/claude <text>`: send to active tab, auto-creating one if none exists.

@@ -74,11 +74,15 @@ export function readSessionInfo(jsonlPath: string): {
   }
   const lines = raw.split("\n").filter((line) => line.length > 0);
 
-  // Preview = the *first* substantive user prompt (not the last). The first
-  // message identifies what the session is "about" and is stable across
-  // continuations. We strip IDE / slash-command wrapper tags
-  // (`<ide_opened_file>…</ide_opened_file>`, `<command-message>…</command-message>`)
-  // so the preview shows the user's actual text.
+  // Preview = the user's **first really-typed** message. We have to skip
+  // several Claude-Code-injected `type:"user"` events that aren't actual user
+  // typing:
+  //   - `isMeta:true` — slash-command body injected (skill prompt body, etc)
+  //   - `toolUseResult` field present — tool-call returns (echoed as user event)
+  //   - content is a `<command-message>...</command-message>` wrapper only —
+  //     strips to empty (current behavior, kept)
+  //   - content is a `<system-reminder>` wrapper — also strips to empty
+  // After filters, take the first remaining user event with non-empty text.
   let preview: string | null = null;
   for (let i = 0; i < lines.length; i++) {
     let parsed: unknown;
@@ -88,6 +92,12 @@ export function readSessionInfo(jsonlPath: string): {
       continue;
     }
     if (!isObject(parsed) || parsed["type"] !== "user") {
+      continue;
+    }
+    if (parsed["isMeta"] === true) {
+      continue;
+    }
+    if ("toolUseResult" in parsed) {
       continue;
     }
     const text = stripWrapperTags(extractUserText(parsed)).trim();
@@ -135,6 +145,69 @@ function stripWrapperTags(text: string): string {
     out = out.slice(m[0].length);
   }
   return out;
+}
+
+/**
+ * Pick the last (most recent) **user-typed** text + last assistant **text**
+ * blocks from a session jsonl. Used by the /claude switch panel to show
+ * "where this session left off" so the user knows what context they're
+ * stepping back into.
+ *
+ * Filters mirror readSessionInfo: skip `isMeta:true`, `toolUseResult` events,
+ * and `<command-message>` / `<system-reminder>` wrappers that strip to empty.
+ * Assistant messages: only `content.type==="text"` blocks (tool_use blocks are
+ * not surfaced — keep the display focused on what claude *said*).
+ */
+export function readLastTurn(jsonlPath: string): {
+  lastUserText: string | null;
+  lastAssistantText: string | null;
+} {
+  let raw: string;
+  try {
+    raw = fs.readFileSync(jsonlPath, "utf8");
+  } catch {
+    return { lastUserText: null, lastAssistantText: null };
+  }
+  const lines = raw.split("\n").filter((line) => line.length > 0);
+
+  let lastUserText: string | null = null;
+  let lastAssistantText: string | null = null;
+
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (lastUserText && lastAssistantText) break;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(lines[i] ?? "");
+    } catch {
+      continue;
+    }
+    if (!isObject(parsed)) continue;
+    const type = parsed["type"];
+
+    if (type === "user" && !lastUserText) {
+      if (parsed["isMeta"] === true) continue;
+      if ("toolUseResult" in parsed) continue;
+      const text = stripWrapperTags(extractUserText(parsed)).trim();
+      if (!text) continue;
+      lastUserText = text;
+    } else if (type === "assistant" && !lastAssistantText) {
+      const message = parsed["message"];
+      if (!isObject(message)) continue;
+      const content = message["content"];
+      if (!Array.isArray(content)) continue;
+      const parts: string[] = [];
+      for (const c of content) {
+        if (isObject(c) && c["type"] === "text" && typeof c["text"] === "string") {
+          parts.push(c["text"]);
+        }
+      }
+      const text = parts.join("\n").trim();
+      if (!text) continue;
+      lastAssistantText = text;
+    }
+  }
+
+  return { lastUserText, lastAssistantText };
 }
 
 export function findMostRecentSession(opts: {
