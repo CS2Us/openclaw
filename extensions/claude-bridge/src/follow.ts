@@ -14,6 +14,8 @@
 //   (registerFollow 会先 stop 旧的)
 // - 只 surface 真实人类对话内容：filter isMeta / toolUseResult / 空 strip
 //   后的 wrapper，跟 readSessionInfo 一致
+// - 启动时 backfill 最近 N 轮 QA 作为上下文；之后的 live tail 跳过 user
+//   事件（用户自己刚 DM 进来的文本不需要 echo 回去）
 
 import fs from "node:fs";
 import path from "node:path";
@@ -23,6 +25,7 @@ import { sessionsDir } from "./session-discovery.js";
 const POLL_INTERVAL_MS = 2_000;
 const AUTO_STOP_MS = 30 * 60 * 1000; // 30 min
 const MAX_TELEGRAM_TEXT = 3_900; // <4096 with header / wrapping room
+const DEFAULT_BACKFILL_QA = 3;
 
 type FollowOptions = {
   chatKey: string;
@@ -30,19 +33,56 @@ type FollowOptions = {
   cwd: string;
   telegramChatId: string;
   telegramBotToken: string;
+  /** Number of most recent user→assistant pairs to replay on start. Default 3. */
+  backfillLastNQA?: number;
 };
 
 export function startFollow(opts: FollowOptions): FollowHandle | null {
   const jsonlPath = path.join(sessionsDir(opts.cwd), `${opts.sessionId}.jsonl`);
   let lastSize: number;
+  let initialContents: string;
   try {
     lastSize = fs.statSync(jsonlPath).size;
+    // Snapshot the file at startup time so backfill reads a stable prefix
+    // and live tail picks up only what was appended after lastSize. Any
+    // bytes claude writes between the stat and this readFile end up in
+    // `initialContents` (a strict superset of the lastSize prefix is fine —
+    // we trim back to lastSize bytes before parsing so the live tail still
+    // catches them).
+    initialContents = fs.readFileSync(jsonlPath, "utf8").slice(0, lastSize);
   } catch {
     return null;
   }
 
   let stopped = false;
-  let inflight: Promise<void> = Promise.resolve();
+
+  const backfillN = opts.backfillLastNQA ?? DEFAULT_BACKFILL_QA;
+  const backfillLines = pickBackfillEvents(splitJsonlLines(initialContents), backfillN);
+
+  // Backfill runs as the first link in the inflight chain. setInterval ticks
+  // queue behind it, so even if backfill takes >2s, no tick races it. Live
+  // tail reads from `lastSize` onward and never overlaps backfill's prefix.
+  const inflightSeed: Promise<void> = (async () => {
+    if (stopped || backfillLines.length === 0) return;
+    await sendTelegramMessage(
+      opts.telegramBotToken,
+      opts.telegramChatId,
+      `📜 最近 ${backfillN} 轮对话（回放）：`,
+    );
+    for (const line of backfillLines) {
+      if (stopped) return;
+      const parsed = formatJsonlEvent(line);
+      if (!parsed) continue;
+      if (parsed.text) {
+        for (const chunk of chunkForTelegram(parsed.text)) {
+          if (stopped) return;
+          await sendTelegramMessage(opts.telegramBotToken, opts.telegramChatId, chunk);
+        }
+      }
+    }
+  })().catch(() => {});
+
+  let inflight: Promise<void> = inflightSeed;
 
   const tick = async (): Promise<void> => {
     if (stopped) return;
@@ -76,6 +116,11 @@ export function startFollow(opts: FollowOptions): FollowHandle | null {
       if (stopped) return;
       const parsed = formatJsonlEvent(line);
       if (!parsed) continue;
+      // Drop user events in live tail: the user typed them into this same
+      // Telegram chat moments ago — echoing the text back is pure noise.
+      // Backfill above intentionally surfaces user lines so historical
+      // context still reads as a conversation.
+      if (parsed.kind === "user") continue;
       // Side effect: any assistant message that contains a tool_use block
       // triggers a `typing` chat action so the user can see claude is
       // actively working without us renaming/spamming the stream with
@@ -85,7 +130,10 @@ export function startFollow(opts: FollowOptions): FollowHandle | null {
         await sendTelegramTypingAction(opts.telegramBotToken, opts.telegramChatId);
       }
       if (parsed.text) {
-        await sendTelegramMessage(opts.telegramBotToken, opts.telegramChatId, parsed.text);
+        for (const chunk of chunkForTelegram(parsed.text)) {
+          if (stopped) return;
+          await sendTelegramMessage(opts.telegramBotToken, opts.telegramChatId, chunk);
+        }
       }
     }
   };
@@ -130,19 +178,26 @@ export function startAndRegisterFollow(opts: FollowOptions): FollowHandle | null
   return handle;
 }
 
-type FormattedEvent = { text: string | null; hasToolUse: boolean };
+export type FormattedEvent = {
+  text: string | null;
+  hasToolUse: boolean;
+  kind: "user" | "assistant";
+};
 
 /**
  * Parse a jsonl line. Returns `null` only when the event is wholly irrelevant
- * (system/meta/tool_result). Otherwise returns `{text, hasToolUse}`:
+ * (system/meta/tool_result). Otherwise returns `{text, hasToolUse, kind}`:
  *  - `text` is the user-facing message to send into chat (or null if the
  *    event has no conversational content — pure tool_use bursts, etc.).
  *  - `hasToolUse` is true when the assistant event contained at least one
  *    tool_use block. The caller fires a Telegram `sendChatAction(typing)`
  *    so the user can see claude is working, without us spamming the stream
  *    with `[🛠 ToolName]` placeholders (those duplicate the approval card).
+ *  - `kind` lets the caller skip user events in the live tail (the user
+ *    just typed them into this same Telegram chat — echoing is noise) while
+ *    still surfacing them during the backfill replay.
  */
-function formatJsonlEvent(line: string): FormattedEvent | null {
+export function formatJsonlEvent(line: string): FormattedEvent | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(line);
@@ -160,8 +215,9 @@ function formatJsonlEvent(line: string): FormattedEvent | null {
     const cleaned = stripWrapperTags(text).trim();
     if (!cleaned) return null;
     return {
-      text: `👤 你：\n${truncate(cleaned, MAX_TELEGRAM_TEXT - 10)}`,
+      text: `👤 你：\n${cleaned}`,
       hasToolUse: false,
+      kind: "user",
     };
   }
 
@@ -184,12 +240,44 @@ function formatJsonlEvent(line: string): FormattedEvent | null {
     const text = parts.join("\n").trim();
     if (!text && !hasToolUse) return null;
     return {
-      text: text ? `🤖 claude：\n${truncate(text, MAX_TELEGRAM_TEXT - 12)}` : null,
+      text: text ? `🤖 claude：\n${text}` : null,
       hasToolUse,
+      kind: "assistant",
     };
   }
 
   return null;
+}
+
+function splitJsonlLines(contents: string): string[] {
+  return contents.split("\n").filter((line) => line.length > 0);
+}
+
+/**
+ * Pick the tail of `lines` that contains the last `n` surfaced user events
+ * (`formatJsonlEvent` non-null with kind="user") plus every assistant event
+ * that follows them. Pure helper — operates on raw jsonl line strings so it
+ * can be unit-tested without fs.
+ *
+ * If there are fewer than `n` user events in the file, returns from the
+ * first surfaced user event. If there are no surfaced user events, returns
+ * an empty list (no anchor for the replay).
+ */
+export function pickBackfillEvents(lines: readonly string[], n: number): string[] {
+  if (n <= 0) return [];
+  const userLineIndices: number[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const ev = formatJsonlEvent(lines[i] ?? "");
+    if (ev?.kind === "user") {
+      userLineIndices.push(i);
+    }
+  }
+  if (userLineIndices.length === 0) return [];
+  const startIdx =
+    userLineIndices.length <= n
+      ? (userLineIndices[0] ?? 0)
+      : (userLineIndices[userLineIndices.length - n] ?? 0);
+  return lines.slice(startIdx);
 }
 
 function extractUserText(event: Record<string, unknown>): string {
@@ -219,8 +307,81 @@ function stripWrapperTags(text: string): string {
   return out;
 }
 
-function truncate(s: string, max: number): string {
-  return s.length > max ? `${s.slice(0, max)}…` : s;
+/**
+ * Split a formatted event message into ≤`maxLen`-char chunks so Telegram
+ * doesn't truncate long QA at 4096. If the message has a "PREFIX：\nBODY"
+ * shape (which formatJsonlEvent emits — "👤 你：" / "🤖 claude："), the
+ * prefix is rewritten as "PREFIX (i/N)：" on each chunk so the user can
+ * tell parts apart. Body splits prefer line breaks, then spaces, falling
+ * back to a hard cut.
+ *
+ * Pure helper — exported for unit tests.
+ */
+export function chunkForTelegram(text: string, maxLen: number = MAX_TELEGRAM_TEXT): string[] {
+  if (text.length <= maxLen) return [text];
+
+  const nlIdx = text.indexOf("\n");
+  if (nlIdx < 0) {
+    return hardSplit(text, maxLen);
+  }
+  const prefix = text.slice(0, nlIdx);
+  const body = text.slice(nlIdx + 1);
+
+  // Worst-case label overhead: prefix + " (99/99)" = ~prefix.len + 9 chars.
+  // Reserve 24 for safety so even prefixes with multi-byte trailing colons fit.
+  const labelOverhead = prefix.length + 24;
+  const bodyMax = Math.max(200, maxLen - labelOverhead);
+
+  const bodyChunks = splitBody(body, bodyMax);
+  if (bodyChunks.length === 1) {
+    // Body fit after we re-checked against bodyMax — emit untouched.
+    return [text];
+  }
+
+  // Strip trailing ":" / "：" so we can inject "(i/N)" before it.
+  const colonMatch = prefix.match(/[:：]\s*$/);
+  const colon = colonMatch ? colonMatch[0] : "";
+  const baseLabel = colon ? prefix.slice(0, -colon.length) : prefix;
+
+  const total = bodyChunks.length;
+  return bodyChunks.map((chunk, i) => `${baseLabel} (${i + 1}/${total})${colon}\n${chunk}`);
+}
+
+function splitBody(body: string, maxLen: number): string[] {
+  const chunks: string[] = [];
+  let start = 0;
+  while (start < body.length) {
+    if (body.length - start <= maxLen) {
+      chunks.push(body.slice(start));
+      break;
+    }
+    const hardEnd = start + maxLen;
+    // Prefer a newline near the cap (in the second half of the window).
+    let cut = body.lastIndexOf("\n", hardEnd);
+    if (cut <= start + maxLen * 0.5) {
+      // Fall back to a space.
+      cut = body.lastIndexOf(" ", hardEnd);
+    }
+    if (cut <= start + maxLen * 0.5) {
+      // Last resort — hard cut at maxLen.
+      cut = hardEnd;
+      chunks.push(body.slice(start, cut));
+      start = cut;
+    } else {
+      chunks.push(body.slice(start, cut));
+      // Skip the boundary char so we don't start the next chunk with " " / "\n".
+      start = cut + 1;
+    }
+  }
+  return chunks;
+}
+
+function hardSplit(s: string, maxLen: number): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < s.length; i += maxLen) {
+    out.push(s.slice(i, i + maxLen));
+  }
+  return out;
 }
 
 /**

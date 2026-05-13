@@ -105,7 +105,6 @@ export function createTabManagerInteractiveHandler(options?: {
           const active = getActiveTab(getOrCreateChatState(key));
           if (!active?.sessionId || !cwd) {
             header = "⚠️ 没有选中的 session 或 cwd 解析失败，无法 follow";
-            useReply = true;
             break;
           }
           const handle = startAndRegisterFollow({
@@ -125,7 +124,8 @@ export function createTabManagerInteractiveHandler(options?: {
           } else {
             header = "⚠️ follow 启动失败（jsonl 不存在？）";
           }
-          useReply = true;
+          // 同一个面板原地变成 [⏹ 停止流]，不发新面板，避免 chat 历史里
+          // 同时存在两个 panel 让人不知道哪个是当前
           break;
         }
         case "enterAndFollow": {
@@ -156,6 +156,8 @@ export function createTabManagerInteractiveHandler(options?: {
               `📡 follow 中 · session \`${parsed.sessionId.slice(0, 8)}\` —— 等 perm-hook 抬手发卡片`,
             );
           }
+          // enterAndFollow 来自 approval 通知卡片（不是面板），用 reply 发新
+          // 面板才合理：让用户看到一个独立的 session-context 入口。
           useReply = true;
           break;
         }
@@ -171,7 +173,7 @@ export function createTabManagerInteractiveHandler(options?: {
           } else {
             header = "ℹ️ 当前没有 follow 在跑";
           }
-          useReply = true;
+          // 与 follow 对称：在同一面板上把按钮换回 [👁 实时流]
           break;
         }
         case "approveDecision": {

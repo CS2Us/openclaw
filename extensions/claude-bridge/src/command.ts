@@ -7,6 +7,7 @@ import {
   adoptChatStateSession,
   clearActiveTab,
   createNewTab,
+  getActiveFollow,
   getActiveTab,
   getOrCreateChatState,
   resetChatState,
@@ -74,11 +75,17 @@ async function handleClaudeCommand(
   // policy-resolver arbitrator sessions (they pollute the pool — each tool
   // call leaves a tiny one-shot jsonl that would otherwise rank at top).
   //
-  // **不进任何对话**：每次 /claude 清空 activeTabId。用户必须显式点 [N] 或
-  // [+ 新 session] 才能开始对话——避免"我打开 panel 看一眼，结果发消息进了
-  // 上次那条" 的隐式跳路由。
+  // 默认 **不进任何对话**：每次 /claude 清空 activeTabId，避免"我打开 panel
+  // 看一眼，结果发消息进了上次那条"的隐式跳路由。
+  //
+  // 例外：follow 正在跑时 **保留** active tab——用户当前明确在观察一条 session，
+  // 这时 /claude 期望显示"📌 当前 + [⏹ 停止流]"，让面板状态跟用户感知一致，
+  // 而不是把他从已经进入的会话里踢出去。
   if (!args) {
-    clearActiveTab(key);
+    const followActive = getActiveFollow(key) !== undefined;
+    if (!followActive) {
+      clearActiveTab(key);
+    }
     const state = getOrCreateChatState(key);
     const cwd = resolveProjectCwd(config);
     // Cap candidates higher than the 3 rendered slots so renderPanel can drop
@@ -107,7 +114,7 @@ async function handleClaudeCommand(
       }
     }
     const activeSessionId = getActiveTab(state)?.sessionId ?? null;
-    const ui = renderPanel({ entries, activeSessionId });
+    const ui = renderPanel({ entries, activeSessionId, followActive });
     return { text: ui.text, interactive: ui.interactive };
   }
 
