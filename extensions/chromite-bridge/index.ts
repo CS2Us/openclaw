@@ -2,6 +2,7 @@ import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { setChromiteBridgeRuntime } from "./src/chat-state-store.js";
 import { hydrateChatStatesFromStore } from "./src/chat-state.js";
 import { createChromiteCommand } from "./src/command.js";
+import { createConfirmCommand } from "./src/confirm-command.js";
 import { createChromiteBridgeFallthroughHandler } from "./src/fallthrough.js";
 
 export default definePluginEntry({
@@ -21,6 +22,7 @@ export default definePluginEntry({
     });
 
     api.registerCommand(createChromiteCommand({ pluginConfig: api.pluginConfig }));
+    api.registerCommand(createConfirmCommand({ pluginConfig: api.pluginConfig }));
     api.registerInboundFallthroughHandler({
       channel: "telegram",
       handler: createChromiteBridgeFallthroughHandler({

@@ -1,12 +1,12 @@
 {
   "id": "chromite-bridge",
   "name": "Chromite Bridge",
-  "description": "Forward Telegram DMs (and /chromite commands) to local chromite-server /v1/chat/stream for AI-commerce agent loop.",
+  "description": "Forward Telegram DMs (and /chromite commands) to local chromite-server /v1/chat/stream for AI-commerce agent loop. Also handles seller-only /confirm command for manual payment confirmation.",
   "activation": {
     "onStartup": true
   },
   "contracts": {
-    "commands": ["chromite"]
+    "commands": ["chromite", "confirm"]
   },
   "configSchema": {
     "type": "object",
@@ -26,6 +26,12 @@
         "type": "number",
         "default": 300000,
         "description": "Max ms to keep SSE connection alive before aborting."
+      },
+      "sellerTelegramUserIds": {
+        "type": "array",
+        "items": { "type": "string" },
+        "default": [],
+        "description": "Telegram user IDs allowed to use the /confirm seller command. v1 hardcoded list; v2 replaced by chromite-side identity."
       }
     }
   }
