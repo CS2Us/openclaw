@@ -1,0 +1,32 @@
+{
+  "id": "chromite-bridge",
+  "name": "Chromite Bridge",
+  "description": "Forward Telegram DMs (and /chromite commands) to local chromite-server /v1/chat/stream for AI-commerce agent loop.",
+  "activation": {
+    "onStartup": true
+  },
+  "contracts": {
+    "commands": ["chromite"]
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "chromiteUrl": {
+        "type": "string",
+        "default": "http://127.0.0.1:8080",
+        "description": "chromite-server base URL. Falls back to env CHROMITE_BRIDGE_URL."
+      },
+      "maxReplyChars": {
+        "type": "number",
+        "default": 3500,
+        "description": "Truncate final reply (Telegram 4096-char hard limit minus margin)."
+      },
+      "requestTimeoutMs": {
+        "type": "number",
+        "default": 300000,
+        "description": "Max ms to keep SSE connection alive before aborting."
+      }
+    }
+  }
+}

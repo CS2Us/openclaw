@@ -1,0 +1,14 @@
+{
+  "name": "@openclaw/chromite-bridge",
+  "version": "0.1.0",
+  "description": "Bridge OpenClaw chat DMs and /chromite commands to local chromite-server /v1/chat/stream.",
+  "type": "module",
+  "devDependencies": {
+    "@openclaw/plugin-sdk": "workspace:*"
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}
