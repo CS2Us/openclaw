@@ -25,6 +25,16 @@ export type ChromiteEvent =
 export type ChromiteChatRequest = {
   session_id: string;
   user_msg: string;
+  /**
+   * Identity resolution channel hint (spec resolution-middleware-v1 §2 #A).
+   * v1: only `"telegram"`. Optional; when omitted chromite skips identity
+   * resolution and proceeds (dev / CLI parity).
+   */
+  channel?: string;
+  /**
+   * Channel-scoped user id (telegram user_id etc.); paired with `channel`.
+   */
+  channel_user_id?: string;
 };
 
 export type StreamOptions = {

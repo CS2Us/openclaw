@@ -4,6 +4,7 @@ import { hydrateChatStatesFromStore } from "./src/chat-state.js";
 import { createChromiteCommand } from "./src/command.js";
 import { createConfirmCommand } from "./src/confirm-command.js";
 import { createChromiteBridgeFallthroughHandler } from "./src/fallthrough.js";
+import { createRegisterCommand } from "./src/register-command.js";
 
 export default definePluginEntry({
   id: "chromite-bridge",
@@ -23,6 +24,7 @@ export default definePluginEntry({
 
     api.registerCommand(createChromiteCommand({ pluginConfig: api.pluginConfig }));
     api.registerCommand(createConfirmCommand({ pluginConfig: api.pluginConfig }));
+    api.registerCommand(createRegisterCommand({ pluginConfig: api.pluginConfig }));
     api.registerInboundFallthroughHandler({
       channel: "telegram",
       handler: createChromiteBridgeFallthroughHandler({

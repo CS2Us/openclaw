@@ -20,6 +20,11 @@ export function createChromiteBridgeFallthroughHandler(options: {
       chatId: event.chatId,
       accountId: event.accountId,
       text,
+      // resolution-middleware-v1 §2 #D: PluginInboundFallthroughEvent does NOT
+      // expose senderId; for telegram DM private chat we treat chatId as the
+      // sender's user_id (chat.id == user.id in 1-on-1 DM). Breaks for group
+      // chats — single-user-DM is the v1 invariant.
+      senderId: event.chatId,
       pluginConfig: options.pluginConfig,
     });
     return { handled: true, reply: result.reply };

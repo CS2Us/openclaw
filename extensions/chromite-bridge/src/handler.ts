@@ -20,6 +20,13 @@ export type BridgeHandlerInput = {
   accountId?: string;
   /** User-typed text body (after command prefix strip if applicable). */
   text: string;
+  /**
+   * Sender's channel-scoped user id, used for chromite identity resolution
+   * (spec resolution-middleware-v1 §2 #D/#E). Commands set this from
+   * `ctx.senderId`; telegram DM fallthrough uses `event.chatId` as proxy.
+   * Optional —— chromite skips resolution when missing.
+   */
+  senderId?: string;
   pluginConfig?: unknown;
   /** Test seam —— inject deterministic fetch / abort signal. */
   fetchImpl?: typeof fetch;
@@ -65,7 +72,13 @@ export async function dispatchChromiteRound(
   const acc = newAccumulator();
   try {
     const gen = streamChromiteChat(
-      { session_id: sessionId, user_msg: text },
+      {
+        session_id: sessionId,
+        user_msg: text,
+        // resolution-middleware-v1: hardcode telegram channel; chromite ignores
+        // when channel_user_id is empty / channel unknown.
+        ...(input.senderId ? { channel: "telegram", channel_user_id: input.senderId } : {}),
+      },
       {
         chromiteUrl,
         signal: controller.signal,

@@ -40,6 +40,7 @@ async function handleChromiteCommand(
     chatId,
     accountId: ctx.accountId,
     text: body,
+    senderId: ctx.senderId,
     pluginConfig: options.pluginConfig,
   });
   return { reply: result.reply };
