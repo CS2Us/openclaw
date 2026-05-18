@@ -4,6 +4,7 @@ import { hydrateChatStatesFromStore } from "./src/chat-state.js";
 import { createChromiteCommand } from "./src/command.js";
 import { createConfirmCommand } from "./src/confirm-command.js";
 import { createChromiteBridgeFallthroughHandler } from "./src/fallthrough.js";
+import { createChromiteBridgeInboundClaimHandler } from "./src/inbound-claim.js";
 import { createRegisterCommand } from "./src/register-command.js";
 
 export default definePluginEntry({
@@ -25,6 +26,16 @@ export default definePluginEntry({
     api.registerCommand(createChromiteCommand({ pluginConfig: api.pluginConfig }));
     api.registerCommand(createConfirmCommand({ pluginConfig: api.pluginConfig }));
     api.registerCommand(createRegisterCommand({ pluginConfig: api.pluginConfig }));
+    // inbound_claim runs BEFORE commands/agent dispatch — needed to preempt the
+    // embedded auto-reply agent for plain telegram DMs. registerInboundFallthrough
+    // (below) runs LATER in the bot pipeline so the embedded agent fires first
+    // unless something claims here.
+    api.on(
+      "inbound_claim",
+      createChromiteBridgeInboundClaimHandler({ pluginConfig: api.pluginConfig }),
+    );
+    // Kept for back-compat / fallback if another plugin claims first but does
+    // not actually handle a telegram DM body.
     api.registerInboundFallthroughHandler({
       channel: "telegram",
       handler: createChromiteBridgeFallthroughHandler({
