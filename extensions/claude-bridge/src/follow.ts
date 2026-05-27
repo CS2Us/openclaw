@@ -6,8 +6,11 @@
 // 设计取舍：
 // - 用 setInterval 2s 轮询而非 fs.watch —— fs.watch 跨平台行为不一致，
 //   小项目的可靠性比 100ms-级实时性重要
-// - 直发 Telegram bot API（同 overnight supervisor 路径），不经 openclaw
-//   daemon 的 outbound channel —— 那条路径绑在 request scope，背景流不适配
+// - 走 src/telegram-bot-api.ts 的薄 fetch 封装（不经 telegram extension 的
+//   outbound channel —— 那条路径绑在 request scope，背景流不适配）。封装
+//   支持可选 messageThreadId 让 follow 输出落到 forum supergroup 的指定
+//   topic，路由决策由 src/topic-routing.ts 在调用方做完后通过
+//   FollowOptions.telegramThreadId 传入
 // - daemon 由 openclaw-start.sh 注入 `NODE_OPTIONS=--use-env-proxy`，
 //   所以 native fetch 自动走 https_proxy
 // - 自动 30 min 上限（防忘了关）+ 每个 chat 只能 follow 一条 session
@@ -21,6 +24,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { type FollowHandle, registerFollow } from "./chat-state.js";
 import { sessionsDir } from "./session-discovery.js";
+import { sendBotMessage, sendTypingAction } from "./telegram-bot-api.js";
 
 const POLL_INTERVAL_MS = 2_000;
 const AUTO_STOP_MS = 30 * 60 * 1000; // 30 min
@@ -33,6 +37,13 @@ type FollowOptions = {
   cwd: string;
   telegramChatId: string;
   telegramBotToken: string;
+  /**
+   * Forum supergroup topic thread id. When set, all stream output (backfill,
+   * live tail, typing indicator, auto-stop notice) routes into that topic;
+   * `telegramChatId` should be the forum supergroup id, not the DM. When
+   * omitted, output goes to `telegramChatId` directly (DM mode, legacy).
+   */
+  telegramThreadId?: number;
   /** Number of most recent user→assistant pairs to replay on start. Default 3. */
   backfillLastNQA?: number;
 };
@@ -64,11 +75,12 @@ export function startFollow(opts: FollowOptions): FollowHandle | null {
   // tail reads from `lastSize` onward and never overlaps backfill's prefix.
   const inflightSeed: Promise<void> = (async () => {
     if (stopped || backfillLines.length === 0) return;
-    await sendTelegramMessage(
-      opts.telegramBotToken,
-      opts.telegramChatId,
-      `📜 最近 ${backfillN} 轮对话（回放）：`,
-    );
+    await sendBotMessage({
+      botToken: opts.telegramBotToken,
+      chatId: opts.telegramChatId,
+      messageThreadId: opts.telegramThreadId,
+      text: `📜 最近 ${backfillN} 轮对话（回放）：`,
+    });
     for (const line of backfillLines) {
       if (stopped) return;
       const parsed = formatJsonlEvent(line);
@@ -76,7 +88,12 @@ export function startFollow(opts: FollowOptions): FollowHandle | null {
       if (parsed.text) {
         for (const chunk of chunkForTelegram(parsed.text)) {
           if (stopped) return;
-          await sendTelegramMessage(opts.telegramBotToken, opts.telegramChatId, chunk);
+          await sendBotMessage({
+            botToken: opts.telegramBotToken,
+            chatId: opts.telegramChatId,
+            messageThreadId: opts.telegramThreadId,
+            text: chunk,
+          });
         }
       }
     }
@@ -127,12 +144,21 @@ export function startFollow(opts: FollowOptions): FollowHandle | null {
       // [🛠 ToolName] placeholders. Telegram surfaces "typing..." in the
       // chat header for ~5s; consecutive tool_uses naturally re-extend it.
       if (parsed.hasToolUse) {
-        await sendTelegramTypingAction(opts.telegramBotToken, opts.telegramChatId);
+        await sendTypingAction({
+          botToken: opts.telegramBotToken,
+          chatId: opts.telegramChatId,
+          messageThreadId: opts.telegramThreadId,
+        });
       }
       if (parsed.text) {
         for (const chunk of chunkForTelegram(parsed.text)) {
           if (stopped) return;
-          await sendTelegramMessage(opts.telegramBotToken, opts.telegramChatId, chunk);
+          await sendBotMessage({
+            botToken: opts.telegramBotToken,
+            chatId: opts.telegramChatId,
+            messageThreadId: opts.telegramThreadId,
+            text: chunk,
+          });
         }
       }
     }
@@ -147,11 +173,12 @@ export function startFollow(opts: FollowOptions): FollowHandle | null {
     if (stopped) return;
     stopped = true;
     clearInterval(interval);
-    void sendTelegramMessage(
-      opts.telegramBotToken,
-      opts.telegramChatId,
-      `⏹ follow 自动停止（30 分钟上限） · sid=\`${opts.sessionId.slice(0, 8)}\``,
-    );
+    void sendBotMessage({
+      botToken: opts.telegramBotToken,
+      chatId: opts.telegramChatId,
+      messageThreadId: opts.telegramThreadId,
+      text: `⏹ follow 自动停止（30 分钟上限） · sid=\`${opts.sessionId.slice(0, 8)}\``,
+    });
   }, AUTO_STOP_MS);
   timeout.unref?.();
 
@@ -385,68 +412,26 @@ function hardSplit(s: string, maxLen: number): string[] {
 }
 
 /**
- * Direct Telegram bot API call. Daemon-side fetch with proxy support via
- * `NODE_OPTIONS=--use-env-proxy` (injected by scripts/openclaw-start.sh).
- * Errors logged to stderr, never throw — follow loop should keep ticking.
- */
-async function sendTelegramMessage(token: string, chatId: string, text: string): Promise<void> {
-  if (!token) {
-    process.stderr.write("[follow] TG token missing, skipping send\n");
-    return;
-  }
-  try {
-    const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        chat_id: chatId,
-        text,
-        disable_web_page_preview: true,
-      }),
-      signal: AbortSignal.timeout(10_000),
-    });
-    if (!res.ok) {
-      const body = await res.text().catch(() => "");
-      process.stderr.write(`[follow] telegram send rc=${res.status} body=${body.slice(0, 200)}\n`);
-    }
-  } catch (err) {
-    const e = err as { name?: string; message?: string; cause?: { code?: string } };
-    process.stderr.write(
-      `[follow] telegram send error: name=${e?.name} message=${e?.message} cause=${e?.cause?.code}\n`,
-    );
-  }
-}
-
-/**
  * Best-effort send of a one-shot "started" / "stopped" notice. Used by the
- * interactive handler so the user always sees a confirmation event.
+ * interactive handler so the user always sees a confirmation event. The
+ * optional `messageThreadId` routes the notice into a forum topic when
+ * follow is running in forum-routing mode; otherwise it lands in the chat
+ * directly. Errors are swallowed via `sendBotMessage`'s structured return
+ * shape — we discard non-ok results here because the caller already
+ * surfaces the high-level outcome via the panel header.
  */
 export async function notifyFollowEvent(
   token: string,
   chatId: string,
   text: string,
+  messageThreadId?: number,
 ): Promise<void> {
-  await sendTelegramMessage(token, chatId, text);
-}
-
-/**
- * Best-effort `sendChatAction(typing)` — shows "BillyMacClaudeBot is
- * typing..." in the chat header for ~5s. Used to indicate claude is mid-
- * tool-call without us materializing a chat message for every step.
- * Errors are swallowed; follow stream keeps going.
- */
-async function sendTelegramTypingAction(token: string, chatId: string): Promise<void> {
-  if (!token) return;
-  try {
-    await fetch(`https://api.telegram.org/bot${token}/sendChatAction`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ chat_id: chatId, action: "typing" }),
-      signal: AbortSignal.timeout(5_000),
-    });
-  } catch {
-    // best-effort; the action indicator is cosmetic
-  }
+  await sendBotMessage({
+    botToken: token,
+    chatId,
+    text,
+    messageThreadId,
+  });
 }
 
 /**

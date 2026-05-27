@@ -6,6 +6,8 @@ import { getDaemonGatewayClient } from "./src/daemon-gateway-client.js";
 import { createClaudeBridgeFallthroughHandler } from "./src/fallthrough.js";
 import { notifyAndClearStaleFollowMarkers } from "./src/follow-marker.js";
 import { createTabManagerInteractiveHandler } from "./src/interactive.js";
+import { hydratePanelIdsFromStore, setPanelIdRuntime } from "./src/panel-id-store.js";
+import { hydrateTopicMappingsFromStore, setTopicRoutingRuntime } from "./src/topic-routing.js";
 
 export default definePluginEntry({
   id: "claude-bridge",
@@ -14,6 +16,8 @@ export default definePluginEntry({
     "Forward Telegram DMs (and explicit /claude commands) to local Claude Code (`claude -p`).",
   register(api) {
     setClaudeBridgeRuntime(api.runtime);
+    setTopicRoutingRuntime(api.runtime);
+    setPanelIdRuntime(api.runtime);
     // Hydrate persisted per-chat sessionIds so the very first DM after a
     // daemon restart still spawns claude with `--resume <prior>`. Fire-and-
     // forget: in-memory chat-state remains correct (just empty) until this
@@ -22,6 +26,16 @@ export default definePluginEntry({
       // chat-state-store already logs the underlying failure and disables
       // itself; nothing to do here.
     });
+    // Load any forum topic mappings persisted from a prior daemon process
+    // so follow streams can reuse existing topics instead of creating new
+    // ones on first lookup. Best-effort; falls back to "create fresh on
+    // miss" semantics when the store is unavailable.
+    void hydrateTopicMappingsFromStore().catch(() => {});
+    // Load the per-chat /claude panel message ids so re-issuing /claude
+    // after a daemon restart edits the same panel message instead of
+    // posting a new one. Best-effort; on miss the next /claude posts a
+    // fresh panel and re-seeds the store.
+    void hydratePanelIdsFromStore().catch(() => {});
 
     api.registerCommand(createClaudeCommand({ pluginConfig: api.pluginConfig }));
     api.registerInboundFallthroughHandler({

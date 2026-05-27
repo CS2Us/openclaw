@@ -21,6 +21,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { sendBotMessage } from "./telegram-bot-api.js";
 
 const MARKER_DIR = "/tmp/openclaw/follow-markers";
 
@@ -102,19 +103,18 @@ async function sendStaleFollowNotice(
   chatId: string,
   sessionId: string,
 ): Promise<void> {
+  // Always lands in the user's DM (the chat that originally issued /claude),
+  // never inside a forum topic — a stale-restart notice belongs where the
+  // user first sees the bot, not buried in a per-project thread they may
+  // not have open.
   const sidShort = sessionId.slice(0, 8);
-  const text =
-    `⏹ 推流已关闭（daemon 重启）\n` +
-    `上次在 session \`${sidShort}\`。发 /claude 看面板重新选 session。`;
-  await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      chat_id: chatId,
-      text,
-      parse_mode: "Markdown",
-      disable_web_page_preview: true,
-    }),
-    signal: AbortSignal.timeout(8_000),
+  await sendBotMessage({
+    botToken: token,
+    chatId,
+    text:
+      `⏹ 推流已关闭（daemon 重启）\n` +
+      `上次在 session \`${sidShort}\`。发 /claude 看面板重新选 session。`,
+    parseMode: "Markdown",
+    timeoutMs: 8_000,
   });
 }

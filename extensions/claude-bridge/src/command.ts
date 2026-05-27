@@ -22,6 +22,7 @@ import {
   truncate,
   type ClaudeBridgeConfig,
 } from "./handler.js";
+import { clearPanelId, getPanelId } from "./panel-id-store.js";
 import {
   buildPermHookEnv,
   resolveGatewayPassword,
@@ -30,6 +31,7 @@ import {
 } from "./perm-hook-spawn.js";
 import { findMostRecentSession, listSessionFiles, readSessionInfo } from "./session-discovery.js";
 import { type PanelEntry, renderPanel } from "./tab-manager-ui.js";
+import { deleteMessage } from "./telegram-bot-api.js";
 
 export function createClaudeCommand(options: {
   pluginConfig?: unknown;
@@ -115,6 +117,27 @@ async function handleClaudeCommand(
     }
     const activeSessionId = getActiveTab(state)?.sessionId ?? null;
     const ui = renderPanel({ entries, activeSessionId, followActive });
+
+    // Single-panel semantics from the command path: if a prior panel
+    // exists, fire-and-forget delete it so the chat ends up with only the
+    // about-to-be-posted panel. We deliberately let the runtime post the
+    // new panel (returning the rendered ReplyPayload) rather than going
+    // raw-fetch ourselves — empty PluginCommandResult triggers the
+    // telegram extension's "No response generated. Please try again."
+    // fallback (see bot-message-dispatch.ts EMPTY_RESPONSE_FALLBACK).
+    //
+    // The store id reseeds itself the first time the user taps a button
+    // on the new panel — interactive.ts adopts callback.messageId as the
+    // canonical panel id. Until then the store points at the (now-deleted)
+    // prior id; clearPanelId here keeps in-memory state honest so the
+    // next callback won't try to edit a tombstoned message.
+    const chatId = stripChannelPrefix(ctx.channel, key);
+    const botToken = process.env.TG_BOT_TOKEN ?? "";
+    const prior = getPanelId(key);
+    if (prior && prior.chatId === chatId && botToken) {
+      void deleteMessage({ botToken, chatId, messageId: prior.messageId });
+      clearPanelId(key);
+    }
     return { text: ui.text, interactive: ui.interactive };
   }
 

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   buildClaudeSpawnArgs,
   buildClaudeSpawnEnv,
@@ -115,6 +115,18 @@ describe("buildClaudeSpawnArgs", () => {
     prompt: "hello",
   };
 
+  const originalPermissionMode = process.env.CLAUDE_BRIDGE_PERMISSION_MODE;
+  beforeEach(() => {
+    delete process.env.CLAUDE_BRIDGE_PERMISSION_MODE;
+  });
+  afterEach(() => {
+    if (originalPermissionMode === undefined) {
+      delete process.env.CLAUDE_BRIDGE_PERMISSION_MODE;
+    } else {
+      process.env.CLAUDE_BRIDGE_PERMISSION_MODE = originalPermissionMode;
+    }
+  });
+
   it("emits the minimal stream-json+verbose invocation", () => {
     const args = buildClaudeSpawnArgs(baseParams);
     expect(args).toEqual([
@@ -126,6 +138,19 @@ describe("buildClaudeSpawnArgs", () => {
       "--allowed-tools",
       "Read,Edit",
     ]);
+  });
+
+  it("appends --permission-mode <mode> when CLAUDE_BRIDGE_PERMISSION_MODE is set", () => {
+    process.env.CLAUDE_BRIDGE_PERMISSION_MODE = "auto";
+    const args = buildClaudeSpawnArgs(baseParams);
+    expect(args).toContain("--permission-mode");
+    expect(args[args.indexOf("--permission-mode") + 1]).toBe("auto");
+  });
+
+  it("omits --permission-mode when the env var is empty or only whitespace", () => {
+    process.env.CLAUDE_BRIDGE_PERMISSION_MODE = "   ";
+    const args = buildClaudeSpawnArgs(baseParams);
+    expect(args).not.toContain("--permission-mode");
   });
 
   it("appends --resume <id> when resumeSessionId is set", () => {

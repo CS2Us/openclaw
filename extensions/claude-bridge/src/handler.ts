@@ -67,6 +67,17 @@ export function buildClaudeSpawnArgs(params: RunClaudeParams): string[] {
     "--allowed-tools",
     params.allowedTools,
   ];
+  // Forward CLAUDE_BRIDGE_PERMISSION_MODE → `claude --permission-mode <mode>`.
+  // Native Claude CLI semantics: "auto" uses the classifier (safe ops auto-
+  // approve, risky ops still fire PreToolUse hook → bot approval card);
+  // "bypassPermissions" allows everything (perm-hook never fires); "default"
+  // asks for every tool (perm-hook always fires). Unset = let claude pick
+  // its own default. Lets the bridge-spawned subprocess inherit the same
+  // permission posture the IDE's `--permission-mode auto` provides.
+  const permissionMode = process.env.CLAUDE_BRIDGE_PERMISSION_MODE?.trim();
+  if (permissionMode) {
+    args.push("--permission-mode", permissionMode);
+  }
   if (params.resumeSessionId) {
     args.push("--resume", params.resumeSessionId);
   }

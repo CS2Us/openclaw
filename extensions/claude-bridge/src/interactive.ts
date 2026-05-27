@@ -10,7 +10,6 @@
 // shape, our local type just gets stale and the handler keeps compiling.
 
 import path from "node:path";
-import type { InteractiveReplyBlock } from "openclaw/plugin-sdk/interactive-runtime";
 import type { PluginInteractiveHandlerRegistration } from "openclaw/plugin-sdk/plugin-runtime";
 import {
   chatStateKey,
@@ -26,6 +25,8 @@ import {
 import { getDaemonGatewayClient } from "./daemon-gateway-client.js";
 import { normalizeTelegramChatId, notifyFollowEvent, startAndRegisterFollow } from "./follow.js";
 import { type ClaudeBridgeConfig, resolveProjectCwd } from "./handler.js";
+import { deliverPanel } from "./panel-delivery.js";
+import { setPanelId } from "./panel-id-store.js";
 import {
   listSessionFiles,
   readLastTurn,
@@ -38,26 +39,30 @@ import {
   parseCallbackPayload,
   renderPanel,
 } from "./tab-manager-ui.js";
-
-type TelegramButton = {
-  text: string;
-  callback_data: string;
-  style?: "danger" | "success" | "primary";
-};
-type TelegramButtons = Array<Array<TelegramButton>>;
+import { resolveFollowTarget } from "./topic-routing.js";
 
 type TelegramInteractiveCtx = {
   channel: "telegram";
-  callback: { payload: string; chatId: string };
-  auth: { isAuthorizedSender: boolean };
-  respond: {
-    // editMessage 用于在原 panel 上编辑（refresh / closeTab / 静默操作）
-    editMessage: (params: { text: string; buttons?: TelegramButtons }) => Promise<void>;
-    // reply 用于发**新** panel 消息（switch / newTab —— 体感"开新聊天界面"）
-    // 实际由 telegram channel runtime 注入，类型只声明我们用到的部分（claude-bridge
-    // 不能 import telegram extension barrel，结构性 mirror 即可）
-    reply: (params: { text: string; buttons?: TelegramButtons }) => Promise<void>;
+  callback: {
+    payload: string;
+    chatId: string;
+    /**
+     * Telegram message_id of the message that holds the tapped button. For
+     * panel buttons this is the panel message; for approval-card buttons
+     * (e.g. enterAndFollow) this is the approval card. We use this to keep
+     * the persistent panel-id store in sync with reality — the *displayed*
+     * panel is authoritative, not whatever was last persisted.
+     *
+     * Structurally mirrored from the telegram extension's callback context
+     * (see extensions/telegram/src/interactive-dispatch.ts).
+     */
+    messageId?: number;
   };
+  auth: { isAuthorizedSender: boolean };
+  // No `respond` mirror anymore: the panel pipeline writes via
+  // panel-delivery.ts (raw editMessageText), and runtime auto-acks the
+  // callback after the handler returns, so t.respond.editMessage isn't
+  // needed just to clear the button loading icon.
 };
 
 export function createTabManagerInteractiveHandler(options?: {
@@ -82,8 +87,25 @@ export function createTabManagerInteractiveHandler(options?: {
       const tgToken = process.env.TG_BOT_TOKEN ?? "";
       const tgChatId = normalizeTelegramChatId(t.callback.chatId);
       let header: string | undefined;
-      // 是否走 reply 发新 panel（switch / newTab）vs editMessage 原地刷（refresh）
-      let useReply = false;
+
+      // Sync the persistent panel id with reality. Most callback kinds
+      // originate from a button on the panel itself, so the message id we
+      // got from the callback IS the panel — adopt it as the canonical id
+      // so subsequent edits (this turn or future /claude turns) hit the
+      // right message. Two exceptions are skipped because their button
+      // lives elsewhere:
+      //   - enterAndFollow: comes from the approval card; the panel still
+      //     lives at the previously-persisted id (or no id yet).
+      //   - approveDecision: comes from the approval card; doesn't touch
+      //     panel rendering at all (early return below).
+      const fromPanel = parsed.kind !== "enterAndFollow" && parsed.kind !== "approveDecision";
+      if (fromPanel && typeof t.callback.messageId === "number") {
+        setPanelId(key, {
+          chatId: tgChatId,
+          messageId: t.callback.messageId,
+          updatedAt: Date.now(),
+        });
+      }
 
       switch (parsed.kind) {
         case "switch":
@@ -93,13 +115,11 @@ export function createTabManagerInteractiveHandler(options?: {
           header = cwd
             ? buildSwitchHeader(cwd, parsed.sessionId)
             : `📍 切到 session \`${parsed.sessionId.slice(0, 8)}\``;
-          useReply = true;
           break;
         case "newTab":
           stopActiveFollow(key);
           createNewTab(key);
           header = "📍 已起新 session（往下打字开始对话）";
-          useReply = true;
           break;
         case "follow": {
           const active = getActiveTab(getOrCreateChatState(key));
@@ -107,20 +127,31 @@ export function createTabManagerInteractiveHandler(options?: {
             header = "⚠️ 没有选中的 session 或 cwd 解析失败，无法 follow";
             break;
           }
+          const target = await resolveFollowTarget({
+            dmChatId: tgChatId,
+            cwd,
+            sessionId: active.sessionId,
+            botToken: tgToken,
+          });
           const handle = startAndRegisterFollow({
             chatKey: key,
             sessionId: active.sessionId,
             cwd,
-            telegramChatId: tgChatId,
+            telegramChatId: target.chatId,
             telegramBotToken: tgToken,
+            telegramThreadId: target.messageThreadId,
           });
           if (handle) {
             await notifyFollowEvent(
               tgToken,
-              tgChatId,
+              target.chatId,
               `📡 开始 follow session \`${active.sessionId.slice(0, 8)}\`（30 分钟上限，期间该 session 新事件实时推过来）`,
+              target.messageThreadId,
             );
-            header = "📡 follow 中";
+            header =
+              target.messageThreadId !== undefined
+                ? `📡 follow 中（forum topic · 输出推到独立线程）`
+                : "📡 follow 中";
           } else {
             header = "⚠️ follow 启动失败（jsonl 不存在？）";
           }
@@ -136,29 +167,36 @@ export function createTabManagerInteractiveHandler(options?: {
           // separate message right after.
           if (!cwd) {
             header = "⚠️ cwd 解析失败，无法进入 session";
-            useReply = true;
             break;
           }
           stopActiveFollow(key);
           importSessionAsTab(key, parsed.sessionId);
           header = buildSwitchHeader(cwd, parsed.sessionId);
+          const target = await resolveFollowTarget({
+            dmChatId: tgChatId,
+            cwd,
+            sessionId: parsed.sessionId,
+            botToken: tgToken,
+          });
           const handle = startAndRegisterFollow({
             chatKey: key,
             sessionId: parsed.sessionId,
             cwd,
-            telegramChatId: tgChatId,
+            telegramChatId: target.chatId,
             telegramBotToken: tgToken,
+            telegramThreadId: target.messageThreadId,
           });
           if (handle) {
             await notifyFollowEvent(
               tgToken,
-              tgChatId,
+              target.chatId,
               `📡 follow 中 · session \`${parsed.sessionId.slice(0, 8)}\` —— 等 perm-hook 抬手发卡片`,
+              target.messageThreadId,
             );
           }
-          // enterAndFollow 来自 approval 通知卡片（不是面板），用 reply 发新
-          // 面板才合理：让用户看到一个独立的 session-context 入口。
-          useReply = true;
+          // enterAndFollow 来自 approval 通知卡片：panel 的真身在别处（上一次
+          // /claude 发的位置），由 panel-delivery 拿持久化 id 原地刷新它，approval
+          // 卡片保留原状。
           break;
         }
         case "unfollow": {
@@ -242,50 +280,23 @@ export function createTabManagerInteractiveHandler(options?: {
       const followActive = getActiveFollow(key) !== undefined;
       const refreshed = renderPanel({ entries, activeSessionId, header, followActive });
 
-      const respondParams = {
+      // Single-panel pipeline: edit the persisted panel message in place.
+      // For enterAndFollow, the persisted id points to the prior /claude
+      // panel (the approval card is left untouched). For other cases, we
+      // updated the persisted id above to match the callback's source
+      // message, so the edit lands on the very button the user just
+      // tapped. Runtime auto-acks the callback after we return.
+      await deliverPanel({
+        chatKey: key,
+        chatId: tgChatId,
+        botToken: tgToken,
         text: refreshed.text,
-        buttons: interactiveBlocksToTelegramButtons(refreshed.interactive.blocks),
-      };
-      if (useReply) {
-        await t.respond.reply(respondParams);
-      } else {
-        await t.respond.editMessage(respondParams);
-      }
+        blocks: refreshed.interactive.blocks,
+      });
 
       return { handled: true };
     },
   };
-}
-
-function interactiveBlocksToTelegramButtons(
-  blocks: readonly InteractiveReplyBlock[],
-): TelegramButtons {
-  const rows: TelegramButtons = [];
-  for (const block of blocks) {
-    if (block.type !== "buttons") {
-      continue;
-    }
-    const row = block.buttons
-      .filter(
-        (btn): btn is { label: string; value: string; style?: TelegramButton["style"] } =>
-          typeof btn.value === "string" && btn.value.length > 0,
-      )
-      .map((btn): TelegramButton => {
-        const out: TelegramButton = { text: btn.label, callback_data: btn.value };
-        if (isTelegramStyle(btn.style)) {
-          out.style = btn.style;
-        }
-        return out;
-      });
-    if (row.length > 0) {
-      rows.push(row);
-    }
-  }
-  return rows;
-}
-
-function isTelegramStyle(s: unknown): s is TelegramButton["style"] {
-  return s === "danger" || s === "success" || s === "primary";
 }
 
 /**
