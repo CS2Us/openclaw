@@ -13,7 +13,7 @@ function makeCtx(overrides: Partial<PluginCommandContext> = {}): PluginCommandCo
     requestConversationBinding: async () =>
       ({
         granted: false,
-      }) as Awaited<ReturnType<PluginCommandContext["requestConversationBinding"]>>,
+      }) as unknown as Awaited<ReturnType<PluginCommandContext["requestConversationBinding"]>>,
     detachConversationBinding: async () => ({ removed: false }),
     getCurrentConversationBinding: async () => null,
     ...overrides,
@@ -33,20 +33,20 @@ describe("createRegisterCommand", () => {
     const ctx = makeCtx();
     delete ctx.senderId;
     const result = (await cmd.handler(ctx)) as PluginCommandResult;
-    expect(result.reply).toContain("无法识别");
+    expect(result.text).toContain("无法识别");
   });
 
   it("returns usage when args missing", async () => {
     const cmd = createRegisterCommand({ fetchImpl: vi.fn() });
     const result = (await cmd.handler(makeCtx({ args: "" }))) as PluginCommandResult;
-    expect(result.reply).toContain("用法");
-    expect(result.reply).toContain("/register");
+    expect(result.text).toContain("用法");
+    expect(result.text).toContain("/register");
   });
 
   it("returns usage when args is whitespace only", async () => {
     const cmd = createRegisterCommand({ fetchImpl: vi.fn() });
     const result = (await cmd.handler(makeCtx({ args: "   " }))) as PluginCommandResult;
-    expect(result.reply).toContain("用法");
+    expect(result.text).toContain("用法");
   });
 
   it("posts to chromite identity/register with telegram channel + senderId + trimmed name", async () => {
@@ -66,7 +66,7 @@ describe("createRegisterCommand", () => {
     )) as PluginCommandResult;
 
     expect(fetchImpl).toHaveBeenCalledOnce();
-    const [url, init] = fetchImpl.mock.calls[0] as [string, RequestInit];
+    const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
     expect(url).toBe("http://test:8080/v1/identity/register");
     expect(init.method).toBe("POST");
     const body = JSON.parse(init.body as string) as Record<string, unknown>;
@@ -74,10 +74,10 @@ describe("createRegisterCommand", () => {
     expect(body.channel_user_id).toBe("8797479017");
     expect(body.display_name).toBe("张三");
 
-    expect(result.reply).toContain("✅");
-    expect(result.reply).toContain("注册成功");
-    expect(result.reply).toContain("张三");
-    expect(result.reply).toContain("8f3e1234-aaaa-bbbb-cccc-1234567890ab");
+    expect(result.text).toContain("✅");
+    expect(result.text).toContain("注册成功");
+    expect(result.text).toContain("张三");
+    expect(result.text).toContain("8f3e1234-aaaa-bbbb-cccc-1234567890ab");
   });
 
   it("renders 'already registered' reply when chromite returns created=false", async () => {
@@ -94,12 +94,12 @@ describe("createRegisterCommand", () => {
     });
     const result = (await cmd.handler(makeCtx({ args: "新昵称" }))) as PluginCommandResult;
 
-    expect(result.reply).toContain("ℹ️");
-    expect(result.reply).toContain("已经注册过");
-    expect(result.reply).toContain("原昵称");
-    expect(result.reply).toContain("existing-uuid");
+    expect(result.text).toContain("ℹ️");
+    expect(result.text).toContain("已经注册过");
+    expect(result.text).toContain("原昵称");
+    expect(result.text).toContain("existing-uuid");
     // 关键：第二次 register 提交的"新昵称"被忽略，回执显示既有 display_name (spec 决策 #C)
-    expect(result.reply).not.toContain("新昵称");
+    expect(result.text).not.toContain("新昵称");
   });
 
   it("renders 4xx error reply on invalid input (chromite-side validation)", async () => {
@@ -111,9 +111,9 @@ describe("createRegisterCommand", () => {
       fetchImpl,
     });
     const result = (await cmd.handler(makeCtx({ args: "x" }))) as PluginCommandResult;
-    expect(result.reply).toContain("❌");
-    expect(result.reply).toContain("输入有问题");
-    expect(result.reply).toContain("display_name");
+    expect(result.text).toContain("❌");
+    expect(result.text).toContain("输入有问题");
+    expect(result.text).toContain("display_name");
   });
 
   it("renders 5xx error reply on chromite internal error", async () => {
@@ -125,8 +125,8 @@ describe("createRegisterCommand", () => {
       fetchImpl,
     });
     const result = (await cmd.handler(makeCtx({ args: "x" }))) as PluginCommandResult;
-    expect(result.reply).toContain("❌");
-    expect(result.reply).toContain("暂时不可用");
+    expect(result.text).toContain("❌");
+    expect(result.text).toContain("暂时不可用");
   });
 
   it("renders network failure reply when fetch throws", async () => {
@@ -138,8 +138,8 @@ describe("createRegisterCommand", () => {
       fetchImpl,
     });
     const result = (await cmd.handler(makeCtx({ args: "x" }))) as PluginCommandResult;
-    expect(result.reply).toContain("❌");
-    expect(result.reply).toContain("ECONNREFUSED");
+    expect(result.text).toContain("❌");
+    expect(result.text).toContain("ECONNREFUSED");
   });
 
   it("renders non-JSON response gracefully", async () => {
@@ -155,7 +155,7 @@ describe("createRegisterCommand", () => {
       fetchImpl,
     });
     const result = (await cmd.handler(makeCtx({ args: "x" }))) as PluginCommandResult;
-    expect(result.reply).toContain("非 JSON");
+    expect(result.text).toContain("非 JSON");
   });
 
   it("name and description fields are stable", () => {

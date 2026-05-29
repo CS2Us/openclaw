@@ -60,8 +60,7 @@ async function handleConfirmCommand(
   const parts = args.split(/\s+/).filter((p) => p.length > 0);
   if (parts.length < 2) {
     return {
-      reply:
-        "用法：/confirm <order-id> <payment-id>\n（两个 ID 都需要——买家完成 commerce_pay 时会同时返回。）",
+      text: "用法：/confirm <order-id> <payment-id>\n（两个 ID 都需要——买家完成 commerce_pay 时会同时返回。）",
     };
   }
   const [orderId, paymentId] = parts;
@@ -90,14 +89,14 @@ async function handleConfirmCommand(
       parsed = text ? (JSON.parse(text) as ManualConfirmResponse) : {};
     } catch {
       return {
-        reply: `chromite 返回非 JSON 响应（HTTP ${resp.status}）：${text.slice(0, 200)}`,
+        text: `chromite 返回非 JSON 响应（HTTP ${resp.status}）：${text.slice(0, 200)}`,
       };
     }
 
     if (resp.ok) {
       const already = parsed.already_confirmed ? "（重复调用：之前已确认）" : "";
       return {
-        reply:
+        text:
           `✅ Order ${orderId} / Payment ${paymentId}\n` +
           `Payment=${parsed.payment_state ?? "?"} / Order=${parsed.order_state ?? "?"}${already}`,
       };
@@ -108,14 +107,14 @@ async function handleConfirmCommand(
     // rbac-v1 RB3=A: 403 是 chromite 鉴权拒绝 (not_seller / unregistered)，
     // message 已是 user-facing 中文，直接转给卖家，不带 HTTP 噪音。
     if (resp.status === 403) {
-      return { reply: `❌ ${errMsg}` };
+      return { text: `❌ ${errMsg}` };
     }
     return {
-      reply: `❌ /confirm 失败 (HTTP ${resp.status} / ${errKind}): ${errMsg}`,
+      text: `❌ /confirm 失败 (HTTP ${resp.status} / ${errKind}): ${errMsg}`,
     };
   } catch (e) {
     const reason = e instanceof Error ? e.message : String(e);
-    return { reply: `❌ /confirm 调用 chromite 失败：${reason}` };
+    return { text: `❌ /confirm 调用 chromite 失败：${reason}` };
   } finally {
     clearTimeout(timer);
   }

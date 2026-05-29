@@ -29,11 +29,11 @@ async function handleChromiteCommand(
   const body = stripChromitePrefix((ctx.args ?? "").trim() || ctx.commandBody.trim());
   const chatId = ctx.to ?? ctx.from ?? "";
   if (!chatId) {
-    return { reply: "chromite-bridge: missing chat id (no `to`/`from` in command context)." };
+    return { text: "chromite-bridge: missing chat id (no `to`/`from` in command context)." };
   }
   if (!body) {
     return {
-      reply: "用法：`/chromite <消息>`，或直接发普通消息（DM 默认进 chromite）。",
+      text: "用法：`/chromite <消息>`，或直接发普通消息（DM 默认进 chromite）。",
     };
   }
   const result = await dispatchChromiteRound({
@@ -43,5 +43,5 @@ async function handleChromiteCommand(
     senderId: ctx.senderId,
     pluginConfig: options.pluginConfig,
   });
-  return { reply: result.reply };
+  return { text: result.reply };
 }

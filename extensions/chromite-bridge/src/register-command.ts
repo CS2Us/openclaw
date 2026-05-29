@@ -52,14 +52,14 @@ async function handleRegisterCommand(
 
   if (!ctx.senderId) {
     return {
-      reply: "❌ /register 无法识别你的 telegram 身份 (no senderId)。请联系管理员。",
+      text: "❌ /register 无法识别你的 telegram 身份 (no senderId)。请联系管理员。",
     };
   }
 
   const displayName = (ctx.args ?? "").trim();
   if (!displayName) {
     return {
-      reply: "用法：/register <昵称>\n例：/register 张三",
+      text: "用法：/register <昵称>\n例：/register 张三",
     };
   }
 
@@ -87,21 +87,21 @@ async function handleRegisterCommand(
       parsed = text ? (JSON.parse(text) as RegisterResponse) : {};
     } catch {
       return {
-        reply: `❌ chromite 返回非 JSON 响应 (HTTP ${resp.status}): ${text.slice(0, 200)}`,
+        text: `❌ chromite 返回非 JSON 响应 (HTTP ${resp.status}): ${text.slice(0, 200)}`,
       };
     }
 
     if (resp.ok && parsed.user_id) {
       if (parsed.created) {
         return {
-          reply:
+          text:
             `✅ 注册成功\n` +
             `昵称：${parsed.display_name ?? displayName}\n` +
             `chromite user_id：${parsed.user_id}`,
         };
       }
       return {
-        reply:
+        text:
           `ℹ️ 你已经注册过了\n` +
           `昵称：${parsed.display_name ?? "(未知)"}\n` +
           `chromite user_id：${parsed.user_id}\n` +
@@ -114,15 +114,15 @@ async function handleRegisterCommand(
     const errMsg = parsed.message ?? text.slice(0, 200);
     if (resp.status >= 400 && resp.status < 500) {
       return {
-        reply: `❌ /register 输入有问题：${errMsg}\n（${errKind}）`,
+        text: `❌ /register 输入有问题：${errMsg}\n（${errKind}）`,
       };
     }
     return {
-      reply: `❌ /register 暂时不可用（HTTP ${resp.status} / ${errKind}），稍后再试。`,
+      text: `❌ /register 暂时不可用（HTTP ${resp.status} / ${errKind}），稍后再试。`,
     };
   } catch (e) {
     const reason = e instanceof Error ? e.message : String(e);
-    return { reply: `❌ /register 调用 chromite 失败：${reason}` };
+    return { text: `❌ /register 调用 chromite 失败：${reason}` };
   } finally {
     clearTimeout(timer);
   }

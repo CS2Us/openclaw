@@ -13,7 +13,7 @@ function makeCtx(overrides: Partial<PluginCommandContext> = {}): PluginCommandCo
     requestConversationBinding: async () =>
       ({
         granted: false,
-      }) as Awaited<ReturnType<PluginCommandContext["requestConversationBinding"]>>,
+      }) as unknown as Awaited<ReturnType<PluginCommandContext["requestConversationBinding"]>>,
     detachConversationBinding: async () => ({ removed: false }),
     getCurrentConversationBinding: async () => null,
     ...overrides,
@@ -38,10 +38,10 @@ describe("createConfirmCommand", () => {
       makeCtx({ senderId: "11111", args: "o p" }),
     )) as PluginCommandResult;
     expect(fetchImpl).toHaveBeenCalledOnce();
-    const [, init] = fetchImpl.mock.calls[0] as [string, RequestInit];
+    const [, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
     const body = JSON.parse(init.body as string) as Record<string, unknown>;
     expect(body.seller_id).toBe("11111");
-    expect(result.reply).toContain("✅");
+    expect(result.text).toContain("✅");
   });
 
   it("surfaces chromite 403 not_seller message (no HTTP noise)", async () => {
@@ -53,8 +53,8 @@ describe("createConfirmCommand", () => {
     );
     const cmd = createConfirmCommand({ pluginConfig: {}, fetchImpl });
     const result = (await cmd.handler(makeCtx({ args: "o p" }))) as PluginCommandResult;
-    expect(result.reply).toContain("不是登记的卖家");
-    expect(result.reply).not.toContain("HTTP");
+    expect(result.text).toContain("不是登记的卖家");
+    expect(result.text).not.toContain("HTTP");
   });
 
   it("surfaces chromite 403 unregistered message", async () => {
@@ -69,7 +69,7 @@ describe("createConfirmCommand", () => {
     );
     const cmd = createConfirmCommand({ pluginConfig: {}, fetchImpl });
     const result = (await cmd.handler(makeCtx({ args: "o p" }))) as PluginCommandResult;
-    expect(result.reply).toContain("还没在 chromite 注册");
+    expect(result.text).toContain("还没在 chromite 注册");
   });
 
   it("returns usage when args missing both IDs", async () => {
@@ -78,8 +78,8 @@ describe("createConfirmCommand", () => {
       fetchImpl: vi.fn(),
     });
     const result = (await cmd.handler(makeCtx({ args: "" }))) as PluginCommandResult;
-    expect(result.reply).toContain("用法");
-    expect(result.reply).toContain("/confirm");
+    expect(result.text).toContain("用法");
+    expect(result.text).toContain("/confirm");
   });
 
   it("returns usage when only one ID provided", async () => {
@@ -88,7 +88,7 @@ describe("createConfirmCommand", () => {
       fetchImpl: vi.fn(),
     });
     const result = (await cmd.handler(makeCtx({ args: "only-one" }))) as PluginCommandResult;
-    expect(result.reply).toContain("用法");
+    expect(result.text).toContain("用法");
   });
 
   it("posts to chromite manual-confirm and reports Success/Paid on 200", async () => {
@@ -110,7 +110,7 @@ describe("createConfirmCommand", () => {
     const result = (await cmd.handler(makeCtx({ args: "o_test p_test" }))) as PluginCommandResult;
 
     expect(fetchImpl).toHaveBeenCalledOnce();
-    const [url, init] = fetchImpl.mock.calls[0] as [string, RequestInit];
+    const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
     expect(url).toBe("http://test:8080/v1/commerce/manual-confirm");
     expect(init.method).toBe("POST");
     const body = JSON.parse(init.body as string) as Record<string, unknown>;
@@ -118,9 +118,9 @@ describe("createConfirmCommand", () => {
     expect(body.payment_id).toBe("p_test");
     expect(body.seller_id).toBe("12345");
 
-    expect(result.reply).toContain("✅");
-    expect(result.reply).toContain("Payment=Success");
-    expect(result.reply).toContain("Order=Paid");
+    expect(result.text).toContain("✅");
+    expect(result.text).toContain("Payment=Success");
+    expect(result.text).toContain("Order=Paid");
   });
 
   it("annotates idempotent (already_confirmed) replies", async () => {
@@ -137,7 +137,7 @@ describe("createConfirmCommand", () => {
       fetchImpl,
     });
     const result = (await cmd.handler(makeCtx({ args: "o_idem p_idem" }))) as PluginCommandResult;
-    expect(result.reply).toContain("重复调用");
+    expect(result.text).toContain("重复调用");
   });
 
   it("reports chromite 4xx error with kind + message", async () => {
@@ -155,9 +155,9 @@ describe("createConfirmCommand", () => {
       fetchImpl,
     });
     const result = (await cmd.handler(makeCtx({ args: "o_ghost p_ghost" }))) as PluginCommandResult;
-    expect(result.reply).toContain("❌");
-    expect(result.reply).toContain("OrderNotFound");
-    expect(result.reply).toContain("not found");
+    expect(result.text).toContain("❌");
+    expect(result.text).toContain("OrderNotFound");
+    expect(result.text).toContain("not found");
   });
 
   it("handles network failure gracefully", async () => {
@@ -169,7 +169,7 @@ describe("createConfirmCommand", () => {
       fetchImpl,
     });
     const result = (await cmd.handler(makeCtx({ args: "o p" }))) as PluginCommandResult;
-    expect(result.reply).toContain("❌");
-    expect(result.reply).toContain("ECONNREFUSED");
+    expect(result.text).toContain("❌");
+    expect(result.text).toContain("ECONNREFUSED");
   });
 });
