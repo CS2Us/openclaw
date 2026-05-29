@@ -31,7 +31,7 @@
         "type": "array",
         "items": { "type": "string" },
         "default": [],
-        "description": "Telegram user IDs allowed to use the /confirm seller command. v1 hardcoded list; v2 replaced by chromite-side identity."
+        "description": "DEPRECATED (rbac-v1): seller authz moved to chromite users.role; no longer consumed by /confirm. Kept for config backward-compat; safe to remove."
       }
     }
   }

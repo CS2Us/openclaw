@@ -28,33 +28,48 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 describe("createConfirmCommand", () => {
-  it("rejects non-seller senderId with whitelist hint", async () => {
-    const cmd = createConfirmCommand({
-      pluginConfig: { sellerTelegramUserIds: ["99999"] },
-      fetchImpl: vi.fn(),
-    });
-    const result = (await cmd.handler(makeCtx({ senderId: "11111" }))) as PluginCommandResult;
-    expect(result.reply).toContain("不是登记的卖家");
+  // rbac-v1: openclaw 不再本地白名单校验 —— 鉴权下沉到 chromite (users.role)。
+  it("forwards any senderId to chromite (no local whitelist)", async () => {
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse({ payment_state: "Success", order_state: "Paid", already_confirmed: false }),
+    );
+    const cmd = createConfirmCommand({ pluginConfig: {}, fetchImpl });
+    const result = (await cmd.handler(
+      makeCtx({ senderId: "11111", args: "o p" }),
+    )) as PluginCommandResult;
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    const [, init] = fetchImpl.mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(init.body as string) as Record<string, unknown>;
+    expect(body.seller_id).toBe("11111");
+    expect(result.reply).toContain("✅");
   });
 
-  it("rejects empty whitelist (no seller configured)", async () => {
-    const cmd = createConfirmCommand({
-      pluginConfig: { sellerTelegramUserIds: [] },
-      fetchImpl: vi.fn(),
-    });
-    const result = (await cmd.handler(makeCtx({ senderId: "11111" }))) as PluginCommandResult;
+  it("surfaces chromite 403 not_seller message (no HTTP noise)", async () => {
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse(
+        { error: "not_seller", message: "你不是登记的卖家，无权使用 /confirm 命令" },
+        403,
+      ),
+    );
+    const cmd = createConfirmCommand({ pluginConfig: {}, fetchImpl });
+    const result = (await cmd.handler(makeCtx({ args: "o p" }))) as PluginCommandResult;
     expect(result.reply).toContain("不是登记的卖家");
+    expect(result.reply).not.toContain("HTTP");
   });
 
-  it("rejects missing senderId", async () => {
-    const cmd = createConfirmCommand({
-      pluginConfig: { sellerTelegramUserIds: ["12345"] },
-      fetchImpl: vi.fn(),
-    });
-    const ctx = makeCtx();
-    delete ctx.senderId;
-    const result = (await cmd.handler(ctx)) as PluginCommandResult;
-    expect(result.reply).toContain("不是登记的卖家");
+  it("surfaces chromite 403 unregistered message", async () => {
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse(
+        {
+          error: "unregistered",
+          message: "你还没在 chromite 注册，无法确认收款（请先注册卖家身份）",
+        },
+        403,
+      ),
+    );
+    const cmd = createConfirmCommand({ pluginConfig: {}, fetchImpl });
+    const result = (await cmd.handler(makeCtx({ args: "o p" }))) as PluginCommandResult;
+    expect(result.reply).toContain("还没在 chromite 注册");
   });
 
   it("returns usage when args missing both IDs", async () => {

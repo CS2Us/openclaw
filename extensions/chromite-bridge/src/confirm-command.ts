@@ -3,9 +3,12 @@
 //
 // Flow:
 //   seller DMs `@bot /confirm <order-id> <payment-id>`
-//   → senderId checked against sellerTelegramUserIds whitelist
-//   → POST chromite /v1/commerce/manual-confirm
-//   → reply with payment / order state
+//   → POST chromite /v1/commerce/manual-confirm (seller_id = senderId)
+//   → chromite resolves seller_id → users.role; 非 Seller → 403 (rbac-v1)
+//   → reply with payment / order state, or surface chromite's 403 message
+//
+// rbac-v1 (spec docs/specs/2026-05-29-chromite-identity-rbac-v1.md): seller 鉴权
+// 下沉到 chromite (users.role)。openclaw 不再本地白名单校验 —— sellerTelegramUserIds 已废弃。
 //
 // Bypasses the LLM agent loop — flipping Payment state is a seller admin
 // action, not something the agent should be empowered to do.
@@ -16,7 +19,6 @@ import type {
   PluginCommandResult,
 } from "openclaw/plugin-sdk/plugin-entry";
 import {
-  isSellerTelegramUser,
   resolveChromiteUrl,
   resolveRequestTimeoutMs,
   type ChromiteBridgeConfig,
@@ -51,12 +53,8 @@ async function handleConfirmCommand(
 ): Promise<PluginCommandResult> {
   const cfg = (options.pluginConfig ?? {}) as ChromiteBridgeConfig;
 
-  // Seller whitelist check — v1 single-seller (you).
-  if (!isSellerTelegramUser(cfg, ctx.senderId)) {
-    return {
-      reply: "你不是登记的卖家，无权使用 /confirm 命令。",
-    };
-  }
+  // rbac-v1: seller 鉴权下沉到 chromite (users.role)。openclaw 不再本地白名单校验 ——
+  // seller_id 原样发给 chromite, 非 Seller / 未注册由 chromite 返 403 (RB3=A 区分原因)。
 
   const args = (ctx.args ?? "").trim();
   const parts = args.split(/\s+/).filter((p) => p.length > 0);
@@ -107,6 +105,11 @@ async function handleConfirmCommand(
 
     const errKind = parsed.error ?? "Unknown";
     const errMsg = parsed.message ?? text.slice(0, 200);
+    // rbac-v1 RB3=A: 403 是 chromite 鉴权拒绝 (not_seller / unregistered)，
+    // message 已是 user-facing 中文，直接转给卖家，不带 HTTP 噪音。
+    if (resp.status === 403) {
+      return { reply: `❌ ${errMsg}` };
+    }
     return {
       reply: `❌ /confirm 失败 (HTTP ${resp.status} / ${errKind}): ${errMsg}`,
     };
