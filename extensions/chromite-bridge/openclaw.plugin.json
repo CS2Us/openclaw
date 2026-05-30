@@ -1,7 +1,7 @@
 {
   "id": "chromite-bridge",
   "name": "Chromite Bridge",
-  "description": "Forward Telegram DMs (and /chromite commands) to local chromite-server /v1/chat/stream for AI-commerce agent loop. Also handles seller-only /confirm command for manual payment confirmation.",
+  "description": "Drive a client-side AI-commerce agent loop against local chromite-server (gateway turns + zero-trust commerce RPCs) for Telegram DMs and /chromite commands. Also handles seller-only /confirm command for manual payment confirmation.",
   "activation": {
     "onStartup": true
   },

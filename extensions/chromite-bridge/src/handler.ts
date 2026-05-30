@@ -1,17 +1,23 @@
 // Shared dispatch entry for chromite-bridge —— used by both /chromite command
-// and Telegram DM fallthrough. v1 collect-then-reply form.
+// and Telegram DM fallthrough.
 //
-// sub-spec chromite-harness-openclaw-bridge-v1 §1 + §4 实施步骤 7.
+// hybrid-harness Part B（2026-05-30）：server-side loop (`/v1/chat/stream`) 已全删，
+// Agent Loop 下放给本 edge client。每轮：resolveIdentity（绑 channel↔user）→
+// runEdgeLoop（gateway turn ↔ commerce RPC 循环）→ 截断回复。
+//
+// 原 sub-spec chromite-harness-openclaw-bridge-v1 §1 + §4。
 
 import { chatStateKey, getOrCreateChatState, markUsed } from "./chat-state.js";
-import { streamChromiteChat, type ChromiteEvent } from "./chromite-client.js";
+import { resolveIdentity, runEdgeLoop } from "./chromite-client.js";
 import {
   resolveChromiteUrl,
   resolveMaxReplyChars,
   resolveRequestTimeoutMs,
   type ChromiteBridgeConfig,
 } from "./config.js";
-import { applyEvent, finalizeReply, newAccumulator, truncate } from "./format.js";
+import { truncate } from "./format.js";
+
+const TELEGRAM_CHANNEL = "telegram";
 
 export type BridgeHandlerInput = {
   /** chat / conversation id from the channel adapter (telegram chat_id). */
@@ -39,12 +45,13 @@ export type BridgeHandlerResult = {
 };
 
 /**
- * Run one bridge round: resolve session_id from chat-state, POST to chromite
- * chat endpoint, accumulate SSE events, return final reply text.
+ * Run one bridge round: resolve session_id from chat-state, resolve chromite
+ * identity (bind channel↔user), drive the client-side agent loop, return final
+ * reply text.
  *
- * v1 = collect-then-reply（§3 决策 #B 修正）. Telegram bot 端的 message
- * 由 caller (fallthrough / command) 走 PluginInboundFallthroughResult.reply
- * 或 PluginCommandResult.reply 单条 send。real-time streaming 留 v1.5.
+ * hybrid-harness Part B（2026-05-30）：Agent Loop 在本 edge client。Telegram bot 端
+ * 的 message 由 caller (fallthrough / command) 走 PluginInboundFallthroughResult.reply
+ * 或 PluginCommandResult.reply 单条 send。network error → graceful reply。
  */
 export async function dispatchChromiteRound(
   input: BridgeHandlerInput,
@@ -69,39 +76,37 @@ export async function dispatchChromiteRound(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
-  const acc = newAccumulator();
+  const edgeOpts = {
+    chromiteUrl,
+    channel: TELEGRAM_CHANNEL,
+    channelUserId: input.senderId ?? "",
+    signal: controller.signal,
+    fetchImpl: input.fetchImpl,
+  };
+
+  let reply: string;
   try {
-    const gen = streamChromiteChat(
-      {
-        session_id: sessionId,
-        user_msg: text,
-        // resolution-middleware-v1: hardcode telegram channel; chromite ignores
-        // when channel_user_id is empty / channel unknown.
-        ...(input.senderId ? { channel: "telegram", channel_user_id: input.senderId } : {}),
-      },
-      {
-        chromiteUrl,
-        signal: controller.signal,
-        fetchImpl: input.fetchImpl,
-      },
-    );
-    for await (const ev of gen) {
-      applyEvent(acc, ev);
+    // 1. Bind (channel, senderId) so the zero-trust commerce RPCs resolve.
+    //    Guard for dev / CLI parity: fallthrough/command may lack senderId.
+    if (input.senderId) {
+      await resolveIdentity(edgeOpts);
     }
+    // 2. Drive the client-side agent loop.
+    const result = await runEdgeLoop(text, sessionId, edgeOpts);
+    reply = result.reply;
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     const aborted = controller.signal.aborted;
-    acc.errorMessage =
-      aborted && !acc.errorMessage ? `chromite request timed out after ${timeoutMs} ms` : detail;
+    const message = aborted ? `chromite request timed out after ${timeoutMs} ms` : detail;
+    reply = `⚠️ 出错：${message}`;
   } finally {
     clearTimeout(timer);
   }
 
-  // Mark chat-state usage on any successful turn (even if errored mid-stream,
-  // we still touch lastUsedAt so the state isn't stale-evicted prematurely).
+  // Mark chat-state usage on any round (even if errored, we still touch
+  // lastUsedAt so the state isn't stale-evicted prematurely).
   markUsed(key);
 
-  const reply = finalizeReply(acc, maxReplyChars);
   return {
     reply: truncate(reply, maxReplyChars),
     sessionId,

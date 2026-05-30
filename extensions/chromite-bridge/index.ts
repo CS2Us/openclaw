@@ -11,7 +11,7 @@ export default definePluginEntry({
   id: "chromite-bridge",
   name: "Chromite Bridge",
   description:
-    "Forward Telegram DMs (and /chromite commands) to local chromite-server /v1/chat/stream.",
+    "Drive a client-side AI-commerce agent loop against local chromite-server (gateway + zero-trust commerce RPCs) for Telegram DMs and /chromite commands.",
   register(api) {
     setChromiteBridgeRuntime(api.runtime);
     // Hydrate persisted per-chat session_ids so first DM after daemon restart

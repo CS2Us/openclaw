@@ -1,7 +1,7 @@
 {
   "name": "@openclaw/chromite-bridge",
   "version": "0.1.0",
-  "description": "Bridge OpenClaw chat DMs and /chromite commands to local chromite-server /v1/chat/stream.",
+  "description": "Bridge OpenClaw chat DMs and /chromite commands into a client-side AI-commerce agent loop against local chromite-server.",
   "type": "module",
   "devDependencies": {
     "@openclaw/plugin-sdk": "workspace:*"
