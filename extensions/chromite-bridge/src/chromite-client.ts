@@ -1,61 +1,57 @@
-// chromite edge-loop client —— hybrid-harness Part B (client-side agent loop).
+// chromite edge-loop client —— thin TS adapter over the napi-rs native addon.
 //
-// 架构演进（2026-05-30, hybrid-harness）：chromite-server 的 server-side agent
-// loop (`/v1/chat/stream`) 已**全删**。Agent Loop 状态机下放给**边缘客户端**（本
-// bridge）。本模块持 loop：
+// 架构演进（sub-spec 6 napi-openclaw, RC3 single-source-of-truth）：本 bridge 曾持
+// 一个**重复实现**的 TS edge loop（runGatewayTurn / execCommerceTool / parseSse /
+// runEdgeLoop）。它已**全删**——openclaw 现在消费与 App 完全相同的 Rust core
+// (`chromite-client` crate) 经 napi 暴露的同一个 edge loop。本文件退化为薄适配层：
+// marshal `EdgeLoopOptions` -> `EdgeLoopConfigJs`，调 addon，map 回 bridge 的结果型。
 //
-//   1. resolveIdentity → POST /v1/identity/resolve（绑 channel↔user，使后续零信任
-//      commerce RPC 可解析身份；首次接触自动建 provisional 影子号）。
-//   2. runEdgeLoop → 反复调 /v1/gateway/chat/completions（无状态 OpenAI-compatible
-//      SSE；客户端每轮发完整 messages），解析 gateway SSE 事件累积 text + tool_use；
-//      有 tool_call 则经 /v1/commerce/<tool>（零信任 header）执行后回喂 ToolResult
-//      并继续；无 tool_call 则该 text 是最终回复。
+// 这消除了双端漂移：原先 fixtures/*.json 由 Rust parity.rs + 本 bridge 的 TS loop
+// 两端各跑一遍互证；现在单端（Rust），parity.test.ts 改为驱动 napi addon 跑同一组
+// fixture，作为 napi 路径上的 TS-side 回归测试。
 //
-// gateway SSE 事件（与已删 server-loop 事件不同）：
-//   message_start {} · text_delta {delta} · tool_use_start {index,id,name}
-//   tool_use_input_delta {index,partial_json} · content_block_stop {index}
-//   message_delta {stop_reason}  ← 一轮结束
-//
-// 源契约见 chromite crates/server/src/{gateway_chat,identity_rest,commerce_rest,
-// commerce_rpc_zero_trust}.rs。
+// 边界注意（与已删 TS loop 的行为差异，wiring 时已知并接受）：
+//   - serverTools 清单（C1, 见 chromite-client-napi/src/lib.rs §dispatcher）：napi
+//     binding 不做 catch-all 路由（sub-spec 3 bounded routing 刻意杀掉了 catch-all）。
+//     已删 TS loop 盲发任意 tool name 到 /v1/commerce/<name>；为在不破 bounded routing
+//     的前提下保留这个 reach，caller 必须把 commerce 工具名清单作为 serverTools 传入。
+//     本文件持一份 checked-in 清单 COMMERCE_TOOL_MANIFEST（与 chromite 的 disc/tools
+//     `fn name` 返回值对齐）。未列入清单的 name fail-soft 成 "unknown tool"，不发 HTTP。
+//   - AbortSignal：napi 的 async fn 不接受 AbortSignal，JS 侧无法 mid-flight 取消
+//     native loop。handler.ts 的 timeout 仍靠 `signal` 驱动——本适配层用 Promise.race
+//     让超时**reject** JS promise（native loop 仍跑完，但 caller 拿到超时回复）。这是
+//     coarse cancel（abandon, not cancel），是当前 napi 接口的已知取舍。
+//   - fetchImpl test seam：已删（ReqwestTransport 在 Rust 内 hardcoded）。parity.test.ts
+//     改为对一个本地 node:http fake server 跑真实 loopback HTTP。
+
+import {
+  resolveIdentity as addonResolveIdentity,
+  runEdgeLoopNapi,
+  type EdgeLoopConfigJs,
+} from "@openclaw/chromite-native";
 
 const TELEGRAM_CHANNEL = "telegram";
-const DEFAULT_MAX_TURNS = 8;
 
-/** v1 session token Header（值 = channel_user_id，见 commerce_rpc_zero_trust.rs）。 */
-const HEADER_SESSION_TOKEN = "X-Session-Token";
-/** channel 覆盖 Header（值 = telegram）。 */
-const HEADER_CHANNEL = "X-Channel";
-
-/** OpenAI-compatible message（无状态 gateway：客户端每轮拼完整历史；不发 system）。 */
-export type GatewayMessage = {
-  role: "user" | "assistant" | "tool";
-  content?: string | null;
-  tool_calls?: GatewayToolCall[];
-  tool_call_id?: string;
-};
-
-export type GatewayToolCall = {
-  id: string;
-  function: { name: string; arguments: string };
-};
-
-/** 解析完一轮 gateway SSE 后的产物。 */
-export type GatewayTurn = {
-  /** 累积的 assistant 文本（text_delta 拼接）。 */
-  text: string;
-  /** 本轮 LLM 发起的 tool 调用（按 tool_use_start 的 index 累积 input delta）。 */
-  toolCalls: ParsedToolCall[];
-  /** message_delta 携带的 stop_reason（可能为 null）。 */
-  stopReason: string | null;
-};
-
-export type ParsedToolCall = {
-  id: string;
-  name: string;
-  /** 累积的参数 JSON 字符串（tool_use_input_delta 拼接；可能为空 / 非法）。 */
-  argsJson: string;
-};
+/**
+ * Authoritative commerce tool-name manifest (C1 bounded routing).
+ *
+ * Mirrors the `fn name(&self) -> &str` returns of chromite's
+ * `agents-commerce/src/disc/tools/*` implementations. A tool name the LLM emits
+ * that is NOT in this set fail-softs inside the Rust loop to an "unknown tool"
+ * tool-result string and never hits `/v1/commerce/<name>`. Keep in sync when a
+ * commerce tool is added/removed on the server.
+ */
+export const COMMERCE_TOOL_MANIFEST: readonly string[] = [
+  "commerce_attach_product",
+  "commerce_attach_store",
+  "commerce_create_order",
+  "commerce_create_order_with_bargain",
+  "commerce_detach",
+  "commerce_list_attached",
+  "commerce_list_catalog",
+  "commerce_pay",
+  "commerce_search_catalog",
+];
 
 export type EdgeLoopOptions = {
   chromiteUrl: string;
@@ -63,11 +59,20 @@ export type EdgeLoopOptions = {
   channel: string;
   /** channel-scoped user id；v1 session token = channel_user_id。 */
   channelUserId: string;
+  /**
+   * Abort signal —— now only drives a coarse JS-side timeout (Promise.race). It
+   * CANNOT cancel the in-flight native loop; the loop runs to completion in the
+   * background while the caller's promise rejects on abort. See module header.
+   */
   signal?: AbortSignal;
-  /** Test seam —— 注入确定性 fetch。 */
-  fetchImpl?: typeof fetch;
-  /** loop 上限（默认 8）。 */
+  /** loop 上限（默认由 Rust core clamp 到 8）。 */
   maxTurns?: number;
+  /**
+   * commerce 工具名清单覆盖（默认 COMMERCE_TOOL_MANIFEST）。仅 parity 测试需要——
+   * 它从 fixture 的 commerce 路径派生清单以忠实复现路由（含 fixture-only 的 fake
+   * 工具名如 commerce_loop）。生产路径不传，用 checked-in 清单。
+   */
+  serverTools?: readonly string[];
 };
 
 export type IdentityResolveResult = {
@@ -83,329 +88,75 @@ export type EdgeLoopResult = {
   hitMaxTurns: boolean;
 };
 
+/** Marshal the bridge's `EdgeLoopOptions` onto the napi `EdgeLoopConfigJs`. */
+function toConfig(opts: EdgeLoopOptions): EdgeLoopConfigJs {
+  return {
+    baseUrl: opts.chromiteUrl,
+    channel: opts.channel || TELEGRAM_CHANNEL,
+    channelUserId: opts.channelUserId,
+    // 0/undefined -> Rust core clamps to the default 8 (single source of clamp).
+    maxTurns: opts.maxTurns,
+    serverTools: [...(opts.serverTools ?? COMMERCE_TOOL_MANIFEST)],
+  };
+}
+
+/**
+ * Race a native-addon promise against the abort signal. The napi fns take no
+ * AbortSignal, so this is a COARSE timeout: on abort the returned promise rejects
+ * (handler.ts then renders the timeout reply) while the native loop keeps running
+ * to completion in the background. Without a signal, returns the promise as-is.
+ */
+function withAbort<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+  if (!signal) {
+    return promise;
+  }
+  if (signal.aborted) {
+    return Promise.reject(new Error("aborted"));
+  }
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(new Error("aborted"));
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (v) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(v);
+      },
+      (e) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(e);
+      },
+    );
+  });
+}
+
 // ===== identity resolve =====
 
 /**
- * POST /v1/identity/resolve —— 确保 (channel, channel_user_id) 已绑（首次接触自动
- * 建 provisional 影子号），使后续 /v1/commerce/* 零信任 RPC 能解析到 user。
- * 每轮 loop 前调一次。非 2xx / 非法响应抛错（caller 转 graceful reply）。
+ * POST /v1/identity/resolve via the napi addon —— 绑 (channel, channel_user_id)
+ * 使后续 /v1/commerce/* 零信任 RPC 能解析到 user（首次接触自动建 provisional 影子号）。
+ * 非 2xx / 非法响应在 Rust 内变成 rejected promise（verbatim TS-parity message）。
  */
 export async function resolveIdentity(opts: EdgeLoopOptions): Promise<IdentityResolveResult> {
-  const fetchFn = opts.fetchImpl ?? fetch;
-  const url = `${opts.chromiteUrl}/v1/identity/resolve`;
-  const resp = await fetchFn(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      channel: opts.channel || TELEGRAM_CHANNEL,
-      channel_user_id: opts.channelUserId,
-    }),
-    signal: opts.signal,
-  });
-  if (!resp.ok) {
-    const body = await resp.text().catch(() => "");
-    throw new Error(`chromite identity/resolve ${resp.status}: ${body || "<empty>"}`);
-  }
-  const parsed = (await resp.json().catch(() => null)) as {
-    user_id?: string;
-    provisional?: boolean;
-  } | null;
-  if (!parsed || typeof parsed.user_id !== "string") {
-    throw new Error("chromite identity/resolve returned no user_id");
-  }
-  return { userId: parsed.user_id, provisional: Boolean(parsed.provisional) };
+  const r = await withAbort(addonResolveIdentity(toConfig(opts)), opts.signal);
+  return { userId: r.userId, provisional: r.provisional };
 }
 
 // ===== edge agent loop =====
 
 /**
- * 端侧 agent loop：调 gateway turn，遇 tool_call 执行 commerce RPC 回喂后继续，
- * 直到 LLM 不再调工具（最终回复）或撞 maxTurns 上限。
+ * 端侧 agent loop（现在是 Rust）：调 gateway turn，遇 tool_call 执行 commerce RPC
+ * 回喂后继续，直到 LLM 不再调工具（最终回复）或撞 maxTurns 上限。整个状态机在
+ * `chromite-client` crate 内，经 napi 暴露——本函数只 marshal 进出。
  */
 export async function runEdgeLoop(
   userMsg: string,
   convId: string,
   opts: EdgeLoopOptions,
 ): Promise<EdgeLoopResult> {
-  const maxTurns = opts.maxTurns && opts.maxTurns > 0 ? opts.maxTurns : DEFAULT_MAX_TURNS;
-  const messages: GatewayMessage[] = [{ role: "user", content: userMsg }];
-  let lastText = "";
-
-  for (let iterations = 1; iterations <= maxTurns; iterations++) {
-    const turn = await runGatewayTurn(messages, convId, opts);
-    lastText = turn.text;
-
-    if (turn.toolCalls.length === 0) {
-      // 无 tool_call → 本轮 text 即最终回复。
-      return { reply: turn.text, iterations, hitMaxTurns: false };
-    }
-
-    // 有 tool_call → 把 assistant 回合（text + tool_calls）入栈，执行每个 tool 回喂。
-    messages.push({
-      role: "assistant",
-      content: turn.text || null,
-      tool_calls: turn.toolCalls.map((tc) => ({
-        id: tc.id,
-        function: { name: tc.name, arguments: tc.argsJson || "{}" },
-      })),
-    });
-    for (const tc of turn.toolCalls) {
-      const result = await execCommerceTool(tc, opts);
-      messages.push({ role: "tool", tool_call_id: tc.id, content: result });
-    }
-  }
-
-  // maxTurns 耗尽 —— 返回最后看到的 text（可能为空）。
+  const r = await withAbort(runEdgeLoopNapi(userMsg, convId, toConfig(opts)), opts.signal);
   return {
-    reply: lastText || "(已达最大轮次)",
-    iterations: maxTurns,
-    hitMaxTurns: true,
+    reply: r.reply,
+    iterations: r.iterations,
+    hitMaxTurns: r.hitMaxTurns,
   };
-}
-
-/**
- * 调 POST /v1/gateway/chat/completions（无状态 SSE），解析 gateway 事件累积 text +
- * tool_use（按 index），捕获 stop_reason。非 2xx / 无 body 时抛错。
- */
-export async function runGatewayTurn(
-  messages: GatewayMessage[],
-  convId: string,
-  opts: EdgeLoopOptions,
-): Promise<GatewayTurn> {
-  const fetchFn = opts.fetchImpl ?? fetch;
-  const url = `${opts.chromiteUrl}/v1/gateway/chat/completions`;
-  const resp = await fetchFn(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Accept: "text/event-stream",
-    },
-    body: JSON.stringify({ messages, conv_id: convId }),
-    signal: opts.signal,
-  });
-
-  if (!resp.ok || !resp.body) {
-    const body = await resp.text().catch(() => "");
-    throw new Error(`chromite gateway endpoint ${resp.status}: ${body || "<empty>"}`);
-  }
-
-  let text = "";
-  let stopReason: string | null = null;
-  // tool_use 累积器：index → 部分 tool call（input delta 拼接）。
-  const toolsByIndex = new Map<number, ParsedToolCall>();
-  // 保序：tool_use_start 出现顺序 = 最终 toolCalls 顺序。
-  const order: number[] = [];
-
-  for await (const ev of parseSseStream(resp.body)) {
-    switch (ev.name) {
-      case "text_delta": {
-        const delta = ev.data.delta;
-        if (typeof delta === "string") {
-          text += delta;
-        }
-        break;
-      }
-      case "tool_use_start": {
-        const index = toNumber(ev.data.index);
-        if (index === null) {
-          break;
-        }
-        if (!toolsByIndex.has(index)) {
-          order.push(index);
-        }
-        toolsByIndex.set(index, {
-          id: asString(ev.data.id),
-          name: asString(ev.data.name),
-          argsJson: "",
-        });
-        break;
-      }
-      case "tool_use_input_delta": {
-        const index = toNumber(ev.data.index);
-        if (index === null) {
-          break;
-        }
-        const cur = toolsByIndex.get(index);
-        if (cur && typeof ev.data.partial_json === "string") {
-          cur.argsJson += ev.data.partial_json;
-        }
-        break;
-      }
-      case "message_delta": {
-        const sr = ev.data.stop_reason;
-        stopReason = typeof sr === "string" ? sr : null;
-        break;
-      }
-      // message_start / content_block_stop —— 无累积副作用，忽略。
-      default:
-        break;
-    }
-  }
-
-  const toolCalls = order
-    .map((idx) => toolsByIndex.get(idx))
-    .filter((tc): tc is ParsedToolCall => tc !== undefined);
-
-  return { text, toolCalls, stopReason };
-}
-
-/**
- * POST /v1/commerce/<tool>（零信任）：headers 带 X-Session-Token (= channel_user_id)
- * + X-Channel: telegram。body = 解析后的 tool input（空 / 非法 → `{}`）。
- *
- * fail-soft：非 2xx（如 401）**不**抛错——回喂结构化 error 字符串让 LLM 据此反应，
- * loop 继续。返回值始终是要塞进 ToolResult 的字符串。
- */
-export async function execCommerceTool(
-  toolCall: ParsedToolCall,
-  opts: EdgeLoopOptions,
-): Promise<string> {
-  const fetchFn = opts.fetchImpl ?? fetch;
-  const url = `${opts.chromiteUrl}/v1/commerce/${toolCall.name}`;
-  const input = parseToolInput(toolCall.argsJson);
-
-  try {
-    const resp = await fetchFn(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        [HEADER_SESSION_TOKEN]: opts.channelUserId,
-        [HEADER_CHANNEL]: opts.channel || TELEGRAM_CHANNEL,
-      },
-      body: JSON.stringify(input),
-      signal: opts.signal,
-    });
-    const body = await resp.text();
-    if (!resp.ok) {
-      // 不抛——回喂 error 让 LLM 反应（401 等）。
-      return JSON.stringify({
-        error: `commerce ${toolCall.name} ${resp.status}`,
-        detail: body.slice(0, 500),
-      });
-    }
-    return body;
-  } catch (err) {
-    const detail = err instanceof Error ? err.message : String(err);
-    return JSON.stringify({
-      error: `commerce ${toolCall.name} request_failed`,
-      detail,
-    });
-  }
-}
-
-// ===== SSE 解析 =====
-
-type SseEvent = {
-  name: string;
-  data: Record<string, unknown>;
-};
-
-/**
- * SSE async generator —— 按 `event:` / `data:` 行解析，event 间以空行 (\n\n) 分隔，
- * data JSON-parse。straddle 网络 read 边界的事件被正确缓冲。沿用旧 client 的
- * 分块风格，但事件是 NEW（gateway 事件，非 server-loop 事件）。
- */
-async function* parseSseStream(
-  body: ReadableStream<Uint8Array>,
-): AsyncGenerator<SseEvent, void, void> {
-  const reader = body.getReader();
-  const decoder = new TextDecoder("utf-8");
-  let buf = "";
-  try {
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) {
-        const trailing = parseSseChunk(buf);
-        if (trailing) {
-          yield trailing;
-        }
-        return;
-      }
-      buf += decoder.decode(value, { stream: true });
-      let idx: number;
-      while ((idx = buf.indexOf("\n\n")) !== -1) {
-        const chunk = buf.slice(0, idx);
-        buf = buf.slice(idx + 2);
-        const ev = parseSseChunk(chunk);
-        if (ev) {
-          yield ev;
-        }
-      }
-    }
-  } finally {
-    try {
-      reader.releaseLock();
-    } catch {
-      // already released / stream errored — ignore
-    }
-  }
-}
-
-/**
- * 解析单个 SSE chunk：
- *   event: <name>\n
- *   data: <json>\n
- * `:` 开头是 keep-alive 注释（"ka"），跳过。data 非 JSON / 缺 event 名 → null。
- */
-function parseSseChunk(chunk: string): SseEvent | null {
-  if (!chunk.trim()) {
-    return null;
-  }
-  let name = "";
-  const dataLines: string[] = [];
-  for (const line of chunk.split("\n")) {
-    if (line.startsWith("event:")) {
-      name = line.slice(6).trim();
-    } else if (line.startsWith("data:")) {
-      dataLines.push(line.slice(5).trimStart());
-    }
-    // `:` keep-alive / 其它行 —— skip
-  }
-  if (!name) {
-    return null;
-  }
-  const data = dataLines.join("\n");
-  try {
-    const parsed = data ? JSON.parse(data) : {};
-    if (parsed && typeof parsed === "object") {
-      return { name, data: parsed as Record<string, unknown> };
-    }
-    return { name, data: {} };
-  } catch {
-    // 非 JSON data（如 keep-alive 有时落成纯文本）—— skip
-    return null;
-  }
-}
-
-// ===== helpers =====
-
-/** 解析 tool call 累积的 argsJson；空 / 非法 → `{}`。 */
-function parseToolInput(argsJson: string): unknown {
-  const trimmed = argsJson.trim();
-  if (!trimmed) {
-    return {};
-  }
-  try {
-    return JSON.parse(trimmed);
-  } catch {
-    return {};
-  }
-}
-
-function toNumber(v: unknown): number | null {
-  if (typeof v === "number" && Number.isFinite(v)) {
-    return v;
-  }
-  if (typeof v === "string") {
-    const n = Number(v);
-    if (Number.isFinite(n)) {
-      return n;
-    }
-  }
-  return null;
-}
-
-/** Safe string coercion for SSE-derived `unknown` fields (id/name). */
-function asString(v: unknown): string {
-  return typeof v === "string" ? v : "";
 }

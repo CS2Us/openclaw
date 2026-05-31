@@ -454,6 +454,10 @@ importers:
         version: link:../../packages/plugin-sdk
 
   extensions/chromite-bridge:
+    dependencies:
+      '@openclaw/chromite-native':
+        specifier: workspace:*
+        version: link:../../packages/chromite-native
     devDependencies:
       '@openclaw/plugin-sdk':
         specifier: workspace:*

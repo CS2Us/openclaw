@@ -151,6 +151,15 @@ export const sharedVitestConfig = {
         find: "@openclaw/whatsapp/api.js",
         replacement: path.join(repoRoot, "extensions", "whatsapp", "api.ts"),
       },
+      {
+        // chromite-bridge consumes the chromite-client Rust edge loop via this
+        // native-addon wrapper package (sub-spec 6 / RC3). It re-exports the
+        // napi-rs loader built out-of-tree; resolve it to the ESM entry so tests
+        // load the actual .node addon (no fetchImpl seam — parity drives a real
+        // loopback HTTP server).
+        find: "@openclaw/chromite-native",
+        replacement: path.join(repoRoot, "packages", "chromite-native", "index.mjs"),
+      },
       ...sourcePluginSdkSubpaths.map((subpath) => ({
         find: `openclaw/plugin-sdk/${subpath}`,
         replacement: path.join(repoRoot, "src", "plugin-sdk", `${subpath}.ts`),

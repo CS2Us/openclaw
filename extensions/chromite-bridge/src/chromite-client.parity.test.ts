@@ -1,28 +1,34 @@
-// Shared-fixture parity oracle (TS side) —— core-loop-parity-v1 done_when#2.
+// Shared-fixture parity oracle (TS side) —— core-loop-parity-v1 done_when#2,
+// repurposed for sub-spec 6 (napi-openclaw).
 //
-// This is the *other half* of the dual-end oracle. The Rust integration test
-// `crates/chromite-client/tests/parity.rs` reads the same JSON fixtures and
-// drives `run_edge_loop`; this suite reads the SAME bytes on disk and drives
-// the TS `runEdgeLoop`. A single source of truth (the fixtures/*.json files,
-// checked into git) is consumed by both runtimes, so the two ports cannot
-// silently drift: changing one fixture re-binds both ends.
+// Single source of truth = the Rust `chromite-client` crate. Its integration
+// test `crates/chromite-client/tests/parity.rs` reads the JSON fixtures and
+// drives `run_edge_loop`; this suite reads the SAME bytes on disk and drives the
+// TS `runEdgeLoop` — which now goes through the napi addon into the SAME Rust
+// core. There is no longer a duplicate TS loop, so this is an end-to-end napi
+// regression: the bridge marshals into Rust, Rust runs the loop over REAL HTTP
+// against a loopback server replaying the fixture exchanges, and the terminal
+// result must match the fixture oracle.
 //
-// The fixtures live in the chromite-client Rust crate (the canonical port
-// target). We read them with `fs.readFileSync` (a runtime data read, not a TS
-// module import) so the extension package-import boundary is not crossed; only
-// the byte oracle is shared. If the path ever moves, both `parity.rs` and this
-// file dereference `FIXTURES_DIR` — keep them pointing at the same directory.
+// (Pre-sub-spec-6 this drove a hand-written TS loop via an injected fetchImpl.
+// The napi binding has no fetchImpl seam — TLS/HTTP is reqwest inside Rust — so
+// the mock fetch is replaced by a loopback HTTP server. Chunk-straddle SSE
+// buffering is covered by parity.rs's FixtureTransport; here TCP may coalesce
+// chunks, which is fine: we assert the end-to-end result + recorded requests.)
+//
+// Fixtures live in the main telegram repo (openclaw/ is nested); we read them
+// with fs.readFileSync as a shared data oracle, not a code import.
 
 import { readFileSync } from "node:fs";
+import { createServer, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
-import { runEdgeLoop, type EdgeLoopOptions, type GatewayMessage } from "./chromite-client.js";
+import { afterEach, describe, expect, it } from "vitest";
+import { runEdgeLoop, type EdgeLoopOptions } from "./chromite-client.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 // extensions/chromite-bridge/src → repo-root → src/chromite/crates/chromite-client/fixtures.
-// (openclaw/ is nested in the main telegram repo; the fixtures are committed in
-// the main repo and read here as a shared data oracle, not imported as code.)
 const FIXTURES_DIR = path.resolve(HERE, "../../../../src/chromite/crates/chromite-client/fixtures");
 
 const FIXTURE_NAMES = [
@@ -72,128 +78,121 @@ function loadFixture(name: string): Fixture {
   return JSON.parse(raw) as Fixture;
 }
 
-// ===== fixture-driven fetchImpl (mirror of the Rust FixtureTransport) =====
+// ===== loopback HTTP server replaying the fixture exchanges (in order) =====
 
-/** A recorded outbound request (parsed from the fetch() call). */
+/** A recorded inbound request (Node lowercases header names). */
 type SeenRequest = {
-  url: string;
+  path: string;
   method: string;
   headers: Record<string, string>;
   body: string;
 };
 
-function buildSseResponse(chunks: string[], status: number): Response {
-  const encoder = new TextEncoder();
-  const stream = new ReadableStream<Uint8Array>({
-    start(controller) {
-      // Each fixture chunk is fed as a single enqueue, exactly like the Rust
-      // FixtureTransport yields one Vec<u8> per chunk. Chunk boundaries are
-      // deliberately placed mid-event (straddle) to exercise SSE buffering.
-      for (const chunk of chunks) {
-        controller.enqueue(encoder.encode(chunk));
+/**
+ * Start a loopback server that pops `fixture.exchanges` in arrival order (the
+ * Rust loop issues requests sequentially), asserts each request path against the
+ * exchange's `match.path`, records the request, and replies per the exchange.
+ * Mirrors the Rust `FixtureTransport::pop` + `seen` over real HTTP.
+ */
+function startFixtureServer(fixture: Fixture, seen: SeenRequest[]): Promise<Server> {
+  const queue = [...fixture.exchanges];
+  const server = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (c: Buffer) => chunks.push(c));
+    req.on("end", () => {
+      const headers: Record<string, string> = {};
+      for (const [k, v] of Object.entries(req.headers)) {
+        headers[k] = Array.isArray(v) ? v.join(",") : String(v ?? "");
       }
-      controller.close();
-    },
-  });
-  return new Response(stream, {
-    status,
-    headers: { "content-type": "text/event-stream" },
-  });
-}
-
-function buildUnaryResponse(body: string, status: number): Response {
-  return new Response(body, {
-    status,
-    headers: { "content-type": "application/json" },
-  });
-}
-
-function headersToRecord(init?: RequestInit): Record<string, string> {
-  const out: Record<string, string> = {};
-  const h = init?.headers;
-  if (!h) {
-    return out;
-  }
-  if (Array.isArray(h)) {
-    for (const [k, v] of h) {
-      out[k] = v;
-    }
-  } else if (h instanceof Headers) {
-    h.forEach((v, k) => {
-      out[k] = v;
+      seen.push({
+        path: req.url ?? "",
+        method: req.method ?? "GET",
+        headers,
+        body: Buffer.concat(chunks).toString("utf8"),
+      });
+      const ex = queue.shift();
+      if (!ex) {
+        res.statusCode = 500;
+        res.end(`[${fixture.name}] no scripted reply for ${req.url}`);
+        return;
+      }
+      expect(req.url ?? "", `[${fixture.name}] path for ${req.url}`).toContain(ex.match.path);
+      switch (ex.reply.kind) {
+        case "sse":
+          res.writeHead(ex.reply.status, { "content-type": "text/event-stream" });
+          for (const chunk of ex.reply.chunks) {
+            res.write(chunk);
+          }
+          res.end();
+          break;
+        case "unary":
+          res.writeHead(ex.reply.status, { "content-type": "application/json" });
+          res.end(ex.reply.body);
+          break;
+        case "transport_error":
+          req.socket.destroy(); // abrupt close → reqwest transport error
+          break;
+      }
     });
-  } else {
-    for (const [k, v] of Object.entries(h)) {
-      out[k] = String(v);
-    }
-  }
-  return out;
+  });
+  return new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve(server)));
 }
 
 /**
- * Build a scripted fetch that pops exchanges in order, asserting each request's
- * path against the fixture's `match.path`, and records every request for the
- * `expect_requests` parity assertions. Mirrors `FixtureTransport::pop` + `seen`.
+ * Derive the authoritative server-tool manifest from the fixture's commerce
+ * exchange paths (per EdgeLoopOptions.serverTools doc — parity needs the exact
+ * routing set, including fixture-only fake tool names).
  */
-function buildFetchImpl(fixture: Fixture, seen: SeenRequest[]): typeof fetch {
-  const queue = [...fixture.exchanges];
-  const impl = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-    const url = typeof input === "string" ? input : input.toString();
-    seen.push({
-      url,
-      method: init?.method ?? "GET",
-      headers: headersToRecord(init),
-      body: typeof init?.body === "string" ? init.body : "",
-    });
-    const ex = queue.shift();
-    if (!ex) {
-      throw new Error(`[${fixture.name}] no scripted reply for ${url}`);
+function deriveServerTools(fixture: Fixture): string[] {
+  const set = new Set<string>();
+  for (const ex of fixture.exchanges) {
+    const m = ex.match.path.match(/^\/v1\/commerce\/(.+)$/);
+    if (m) {
+      set.add(m[1]);
     }
-    expect(url, `[${fixture.name}] path for ${url}`).toContain(ex.match.path);
-    switch (ex.reply.kind) {
-      case "sse":
-        return buildSseResponse(ex.reply.chunks, ex.reply.status);
-      case "unary":
-        return buildUnaryResponse(ex.reply.body, ex.reply.status);
-      case "transport_error":
-        throw new Error(ex.reply.message);
-    }
-  };
-  return impl as unknown as typeof fetch;
+  }
+  return [...set];
 }
 
-function buildOpts(fixture: Fixture, fetchImpl: typeof fetch): EdgeLoopOptions {
-  return {
-    chromiteUrl: fixture.config.base_url,
-    channel: fixture.config.channel ?? "telegram",
-    channelUserId: fixture.config.channel_user_id,
-    maxTurns: fixture.config.max_turns ?? 8,
-    fetchImpl,
-  };
-}
+let activeServer: Server | undefined;
+afterEach(async () => {
+  if (activeServer) {
+    await new Promise<void>((r) => activeServer!.close(() => r()));
+    activeServer = undefined;
+  }
+});
 
 async function runFixture(name: string): Promise<void> {
   const fixture = loadFixture(name);
   const seen: SeenRequest[] = [];
-  const fetchImpl = buildFetchImpl(fixture, seen);
-  const opts = buildOpts(fixture, fetchImpl);
+  const server = await startFixtureServer(fixture, seen);
+  activeServer = server;
+  const { port } = server.address() as AddressInfo;
+
+  const opts: EdgeLoopOptions = {
+    chromiteUrl: `http://127.0.0.1:${port}`,
+    channel: fixture.config.channel ?? "telegram",
+    channelUserId: fixture.config.channel_user_id,
+    maxTurns: fixture.config.max_turns ?? 8,
+    serverTools: deriveServerTools(fixture),
+  };
 
   const result = await runEdgeLoop(fixture.user_msg, fixture.conv_id, opts);
 
-  // ===== 1. EdgeLoopResult parity (same oracle the Rust test asserts) =====
-  // Fixtures use snake_case `hit_max_turns`; TS surfaces it as `hitMaxTurns`.
+  // ===== 1. EdgeLoopResult parity (same oracle parity.rs asserts) =====
   expect(result.reply, `[${name}] reply`).toBe(fixture.expect.reply);
   expect(result.iterations, `[${name}] iterations`).toBe(fixture.expect.iterations);
   expect(result.hitMaxTurns, `[${name}] hit_max_turns`).toBe(fixture.expect.hit_max_turns);
 
-  // ===== 2. recorded-request parity (headers / body / role sequence) =====
+  // ===== 2. recorded-request parity (path / headers / body / role sequence) =====
+  // Node lowercases header names; fixtures use canonical case → compare lowercased.
   for (const [i, er] of (fixture.expect_requests ?? []).entries()) {
     const req = seen[i];
     expect(req, `[${name}] missing request #${i}`).toBeDefined();
-    expect(req.url, `[${name}] req#${i} path`).toContain(er.path);
+    expect(req.path, `[${name}] req#${i} path`).toContain(er.path);
     if (er.headers) {
       for (const [k, v] of Object.entries(er.headers)) {
-        expect(req.headers[k], `[${name}] req#${i} header ${k}`).toBe(v);
+        expect(req.headers[k.toLowerCase()], `[${name}] req#${i} header ${k}`).toBe(v);
       }
     }
     if (typeof er.body === "string") {
@@ -203,15 +202,18 @@ async function runFixture(name: string): Promise<void> {
       expect(req.body, `[${name}] req#${i} body_contains`).toContain(er.body_contains);
     }
     if (er.body_roles) {
-      const parsed = JSON.parse(req.body) as { messages: GatewayMessage[] };
+      const parsed = JSON.parse(req.body) as { messages: Array<{ role: string }> };
       const roles = parsed.messages.map((m) => m.role);
       expect(roles, `[${name}] req#${i} message roles`).toEqual(er.body_roles);
     }
   }
 }
 
-describe("chromite-client shared-fixture parity oracle (dual-end with parity.rs)", () => {
-  it.each(FIXTURE_NAMES)("fixture %s drives runEdgeLoop to the expected result", async (name) => {
-    await runFixture(name);
-  });
+describe("chromite-client shared-fixture parity oracle (napi path; dual-end with parity.rs)", () => {
+  it.each(FIXTURE_NAMES)(
+    "fixture %s drives runEdgeLoop (napi→Rust) to the expected result",
+    async (name) => {
+      await runFixture(name);
+    },
+  );
 });
