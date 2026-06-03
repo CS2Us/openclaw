@@ -12,6 +12,7 @@ import { resolveIdentity, runEdgeLoop } from "./chromite-client.js";
 import {
   resolveChromiteUrl,
   resolveMaxReplyChars,
+  resolvePendingStoreDir,
   resolveRequestTimeoutMs,
   type ChromiteBridgeConfig,
 } from "./config.js";
@@ -60,6 +61,11 @@ export async function dispatchChromiteRound(
   const chromiteUrl = resolveChromiteUrl(config);
   const maxReplyChars = resolveMaxReplyChars(config);
   const timeoutMs = resolveRequestTimeoutMs(config);
+  // OPT-IN durable resilience (chromite sub-spec ④ R1): undefined unless an
+  // operator sets CHROMITE_PENDING_STORE_DIR / plugin config. When set, the
+  // native loop restores an interrupted session on the next round with the same
+  // sessionId. ⚠️ Gated on backend commerce idempotency — see resolvePendingStoreDir.
+  const pendingStoreDir = resolvePendingStoreDir(config);
 
   const text = input.text.trim();
   if (!text) {
@@ -82,6 +88,7 @@ export async function dispatchChromiteRound(
     channelUserId: input.senderId ?? "",
     signal: controller.signal,
     fetchImpl: input.fetchImpl,
+    pendingStoreDir,
   };
 
   let reply: string;

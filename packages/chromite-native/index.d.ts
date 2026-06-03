@@ -24,6 +24,20 @@ export interface EdgeLoopConfigJs {
    * client set is empty and every listed name routes to the server commerce RPC.
    */
   serverTools: Array<string>;
+  /**
+   * OPT-IN durable resilience (sub-spec 4 R1). When set, the native loop uses a
+   * FilePendingStore rooted here + run_edge_loop_resumable: an interrupted loop
+   * (transport error after a tool dispatch) persists a per-`convId` snapshot and a
+   * later call with the SAME `convId` restores + continues it. Absent -> the
+   * existing non-resumable path (in-memory store, no cross-call durability).
+   *
+   * (!) HUMAN GATE: restore RE-SENDS the gateway turn and can re-dispatch a
+   * non-idempotent commerce tool already dispatched before the interruption ->
+   * duplicate side-effects (e.g. double charge). Enabling in production REQUIRES
+   * backend commerce idempotency. The bridge gates this behind the
+   * `CHROMITE_PENDING_STORE_DIR` operator env flag, defaulting off.
+   */
+  pendingStoreDir?: string;
 }
 
 /**

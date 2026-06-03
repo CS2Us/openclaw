@@ -73,6 +73,14 @@ export type EdgeLoopOptions = {
    * 工具名如 commerce_loop）。生产路径不传，用 checked-in 清单。
    */
   serverTools?: readonly string[];
+  /**
+   * OPT-IN durable resilience (chromite sub-spec ④ R1). When set, the native loop
+   * persists per-`convId` pending snapshots under this dir and restores an
+   * interrupted loop on a later call with the same `convId`. Absent → the existing
+   * non-resumable path. Production callers derive it from `resolvePendingStoreDir`
+   * (operator env-gated). See the ⚠️ idempotency gate on `EdgeLoopConfigJs`.
+   */
+  pendingStoreDir?: string;
 };
 
 export type IdentityResolveResult = {
@@ -97,6 +105,9 @@ function toConfig(opts: EdgeLoopOptions): EdgeLoopConfigJs {
     // 0/undefined -> Rust core clamps to the default 8 (single source of clamp).
     maxTurns: opts.maxTurns,
     serverTools: [...(opts.serverTools ?? COMMERCE_TOOL_MANIFEST)],
+    // undefined -> non-resumable path (in-memory store); set -> FilePendingStore +
+    // run_edge_loop_resumable. See the ⚠️ idempotency gate on EdgeLoopConfigJs.
+    pendingStoreDir: opts.pendingStoreDir,
   };
 }
 

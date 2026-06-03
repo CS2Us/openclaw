@@ -12,6 +12,17 @@ export type ChromiteBridgeConfig = {
    * docs/specs/2026-05-16-chromite-commerce-payment-manual-confirm-v1.md 决策 #D。
    */
   sellerTelegramUserIds?: string[];
+  /**
+   * OPT-IN durable edge-loop resilience (chromite sub-spec ④ R1). When set, the
+   * native loop persists per-session pending snapshots here and restores an
+   * interrupted loop on a later call with the same session_id. Absent → the
+   * existing non-resumable behavior (no cross-call durability).
+   *
+   * ⚠️ Activation gate: restore re-sends the gateway turn and can re-dispatch a
+   * non-idempotent commerce tool (double charge). Only enable once backend
+   * commerce idempotency is in place. Env override: `CHROMITE_PENDING_STORE_DIR`.
+   */
+  pendingStoreDir?: string;
 };
 
 const DEFAULT_URL = "http://127.0.0.1:8080";
@@ -38,6 +49,24 @@ export function resolveMaxReplyChars(config: ChromiteBridgeConfig): number {
 export function resolveRequestTimeoutMs(config: ChromiteBridgeConfig): number {
   const v = config.requestTimeoutMs;
   return typeof v === "number" && v > 0 ? v : DEFAULT_TIMEOUT_MS;
+}
+
+/**
+ * Resolve the OPT-IN pending-store directory (chromite sub-spec ④ R1). Env
+ * override (`CHROMITE_PENDING_STORE_DIR`) wins, then plugin config; absent →
+ * `undefined`, which keeps the loop on its non-resumable path (safe default).
+ *
+ * ⚠️ Setting this ENABLES interrupted-loop restore in production, which re-sends
+ * the gateway turn and can re-dispatch a non-idempotent commerce tool (double
+ * charge). Only set it once backend commerce idempotency is guaranteed.
+ */
+export function resolvePendingStoreDir(config: ChromiteBridgeConfig): string | undefined {
+  const envDir = process.env.CHROMITE_PENDING_STORE_DIR;
+  if (envDir && envDir.trim()) {
+    return envDir.trim();
+  }
+  const fromConfig = config.pendingStoreDir?.trim();
+  return fromConfig ? fromConfig : undefined;
 }
 
 /** @deprecated rbac-v1: seller 鉴权下沉到 chromite users.role；此 helper 不再被消费。 */
