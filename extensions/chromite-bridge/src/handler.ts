@@ -107,7 +107,12 @@ export async function dispatchChromiteRound(
     // 2. Drive the client-side agent loop.
     const result = await runEdgeLoop(text, sessionId, edgeOpts);
     reply = result.reply;
-    interactionButtons = buildInteractionButtons(result.clientActions);
+    // Bind the pending-operation tokens to this round's principal (bot account +
+    // channel sender), so only the same user can redeem them via /chromite-pay.
+    interactionButtons = buildInteractionButtons(result.clientActions, {
+      accountId: input.accountId,
+      senderId: input.senderId ?? "",
+    });
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     const aborted = controller.signal.aborted;

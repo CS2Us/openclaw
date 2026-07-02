@@ -56,7 +56,8 @@ function seedPaymentProjection(outcome: "succeed" | "fail" = "succeed"): string 
       secrets: { client_secret: "sek_should_not_leak" },
     },
   };
-  const block = buildInteractionButtons([clientAction]);
+  // Mint bound to the same principal makeCtx() redeems as (senderId "12345").
+  const block = buildInteractionButtons([clientAction], { senderId: "12345" });
   expect(block).not.toBeNull();
   return block!.buttons[0].value.replace(/^\/chromite-pay\s+/, "");
 }

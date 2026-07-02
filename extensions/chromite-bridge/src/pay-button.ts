@@ -8,6 +8,7 @@ export {
   PAY_CONFIRM_COMMAND,
   takePendingPayOperation,
   type ClientAction,
+  type OperationPrincipal,
   type PayOutcome,
   type ProjectionButtonsBlock,
   type ProjectionButtonsBlock as PayButtonsBlock,

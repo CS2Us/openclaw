@@ -75,13 +75,15 @@ function operation(outcome: "succeed" | "fail", overrides: Record<string, unknow
   };
 }
 
+const PRINCIPAL = { accountId: "acct1", senderId: "user1" };
+
 beforeEach(() => {
   clearPendingPayOperations();
 });
 
 describe("buildInteractionButtons", () => {
   it("renders projection actions as tokenized buttons", () => {
-    const block = buildInteractionButtons([projectionAction()]);
+    const block = buildInteractionButtons([projectionAction()], PRINCIPAL);
 
     expect(block).not.toBeNull();
     expect(block!.type).toBe("buttons");
@@ -92,7 +94,7 @@ describe("buildInteractionButtons", () => {
   });
 
   it("SECRET DISCIPLINE: button values never include params or secrets", () => {
-    const block = buildInteractionButtons([projectionAction()]);
+    const block = buildInteractionButtons([projectionAction()], PRINCIPAL);
     const serialized = JSON.stringify(block);
 
     expect(serialized).not.toContain("sek_should_not_leak");
@@ -103,41 +105,50 @@ describe("buildInteractionButtons", () => {
   });
 
   it("returns null for absent, malformed, or legacy client actions", () => {
-    expect(buildInteractionButtons([])).toBeNull();
-    expect(buildInteractionButtons(undefined)).toBeNull();
+    expect(buildInteractionButtons([], PRINCIPAL)).toBeNull();
+    expect(buildInteractionButtons(undefined, PRINCIPAL)).toBeNull();
     expect(
-      buildInteractionButtons([{ kind: "payment_request", version: 1, projection: {} }]),
+      buildInteractionButtons([{ kind: "payment_request", version: 1, projection: {} }], PRINCIPAL),
     ).toBeNull();
     expect(
-      buildInteractionButtons([{ kind: "interaction_projection", version: 1, projection: null }]),
+      buildInteractionButtons(
+        [{ kind: "interaction_projection", version: 1, projection: null }],
+        PRINCIPAL,
+      ),
     ).toBeNull();
   });
 
   it("skips operations that are not allowlisted", () => {
-    const block = buildInteractionButtons([
-      projectionAction({
-        operations: {
-          op_confirm_payment: operation("succeed", { kind: "unknown.operation.v1" }),
-        },
-      }),
-    ]);
+    const block = buildInteractionButtons(
+      [
+        projectionAction({
+          operations: {
+            op_confirm_payment: operation("succeed", { kind: "unknown.operation.v1" }),
+          },
+        }),
+      ],
+      PRINCIPAL,
+    );
 
     expect(block).toBeNull();
   });
 
   it("skips actions when resolved params do not satisfy params_schema", () => {
-    const block = buildInteractionButtons([
-      projectionAction({
-        operations: {
-          op_confirm_payment: operation("succeed", {
-            params: {
-              intent_id: { $from: "entity.id" },
-              outcome: { $const: "bogus" },
-            },
-          }),
-        },
-      }),
-    ]);
+    const block = buildInteractionButtons(
+      [
+        projectionAction({
+          operations: {
+            op_confirm_payment: operation("succeed", {
+              params: {
+                intent_id: { $from: "entity.id" },
+                outcome: { $const: "bogus" },
+              },
+            }),
+          },
+        }),
+      ],
+      PRINCIPAL,
+    );
 
     expect(block).toBeNull();
   });
@@ -145,7 +156,7 @@ describe("buildInteractionButtons", () => {
 
 describe("parsePayConfirm / executePayOperation", () => {
   it("executes the stored operation through mock-gateway", async () => {
-    const block = buildInteractionButtons([projectionAction()]);
+    const block = buildInteractionButtons([projectionAction()], PRINCIPAL);
     const parsed = parsePayConfirm(block!.buttons[0].value);
     expect(parsed).not.toBeNull();
 
@@ -153,6 +164,7 @@ describe("parsePayConfirm / executePayOperation", () => {
     const out = await executePayOperation(
       parsed!.token,
       "http://127.0.0.1:8090/",
+      PRINCIPAL,
       fetchMock as unknown as typeof fetch,
     );
 
@@ -162,6 +174,39 @@ describe("parsePayConfirm / executePayOperation", () => {
     expect(url).not.toContain("manual-confirm");
     expect(init?.method).toBe("POST");
     expect(JSON.parse(String(init?.body))).toEqual({ outcome: "succeed" });
+  });
+
+  it("SECURITY: CSPRNG token bound to minting principal; another user cannot redeem", async () => {
+    const alice = { accountId: "acct1", senderId: "alice" };
+    const mallory = { accountId: "acct1", senderId: "mallory" };
+    const block = buildInteractionButtons([projectionAction()], alice);
+    const parsed = parsePayConfirm(block!.buttons[0].value);
+    expect(parsed).not.toBeNull();
+    // CSPRNG: opaque uuid token, no guessable counter/timestamp.
+    expect(parsed!.token).toMatch(
+      /^op_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+    );
+
+    const fetchMock = vi.fn(async () => new Response(null, { status: 200 }));
+    // principal binding: another user cannot redeem Alice's token.
+    await expect(
+      executePayOperation(
+        parsed!.token,
+        "http://gw",
+        mallory,
+        fetchMock as unknown as typeof fetch,
+      ),
+    ).rejects.toThrow(/not found or expired/);
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    // mismatch did not consume the token — the real owner can still redeem.
+    const out = await executePayOperation(
+      parsed!.token,
+      "http://127.0.0.1:8090/",
+      alice,
+      fetchMock as unknown as typeof fetch,
+    );
+    expect(out.ok).toBe(true);
   });
 
   it("rejects non-pay commands and missing tokens", () => {

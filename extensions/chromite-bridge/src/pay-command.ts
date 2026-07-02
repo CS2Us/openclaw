@@ -47,7 +47,15 @@ async function handlePayCommand(
     await (options.fetchImpl ?? fetch)(url, { ...init, signal: controller.signal });
 
   try {
-    const result = await executePayOperation(parsed.token, resolveMockGatewayUrl(cfg), fetchImpl);
+    // Redeem bound to the caller principal — the pending token only executes for
+    // the same (accountId, senderId) it was minted for (projection-engine).
+    const caller = { accountId: ctx.accountId, senderId: ctx.senderId ?? "" };
+    const result = await executePayOperation(
+      parsed.token,
+      resolveMockGatewayUrl(cfg),
+      caller,
+      fetchImpl,
+    );
     if (result.ok) {
       return {
         text:

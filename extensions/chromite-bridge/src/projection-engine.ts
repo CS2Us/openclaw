@@ -1,5 +1,7 @@
 /** Interaction Projection Protocol v1 renderer/executor for chromite-bridge. */
 
+import { randomUUID } from "node:crypto";
+
 export type ClientAction = {
   kind: string;
   version: number;
@@ -21,23 +23,36 @@ export type ProjectionButtonsBlock = {
 
 type JsonRecord = Record<string, unknown>;
 
+/**
+ * Who a pending-operation token was minted for. Redemption is bound to this
+ * principal (see takePendingPayOperation) so a token cannot be redeemed by
+ * another user. `senderId` is the channel-scoped user id; `accountId` is the bot
+ * account (multi-bot isolation).
+ */
+export type OperationPrincipal = {
+  accountId?: string;
+  senderId: string;
+};
+
 export type PendingOperation = {
   actionId: string;
   operationRef: string;
   kind: string;
   params: JsonRecord;
   createdAtMs: number;
+  /** Principal this token was minted for; verified at redemption. */
+  principal: OperationPrincipal;
 };
 
 const OP_CONFIRM_PAYMENT = "mock_payment_gateway.confirm_intent.v1";
 const ALLOWED_OPERATION_KINDS = new Set([OP_CONFIRM_PAYMENT]);
 const PENDING_OPERATION_TTL_MS = 15 * 60 * 1000;
 
-let pendingCounter = 0;
 const pendingOperations = new Map<string, PendingOperation>();
 
 export function buildInteractionButtons(
   clientActions: ClientAction[] | undefined,
+  principal: OperationPrincipal,
 ): ProjectionButtonsBlock | null {
   const action = (clientActions ?? []).find((a) => a.kind === "interaction_projection");
   if (!action) {
@@ -86,6 +101,7 @@ export function buildInteractionButtons(
       kind,
       params,
       createdAtMs: Date.now(),
+      principal,
     });
 
     buttons.push({
@@ -109,9 +125,10 @@ export function parsePayConfirm(value: string): { token: string } | null {
 export async function executePayOperation(
   token: string,
   mockGatewayUrl: string,
+  caller: OperationPrincipal,
   fetchImpl: typeof fetch = fetch,
 ): Promise<{ ok: boolean; status: number; outcome: PayOutcome }> {
-  const operation = takePendingPayOperation(token);
+  const operation = takePendingPayOperation(token, caller);
   if (!operation) {
     throw new Error("payment operation token not found or expired");
   }
@@ -129,12 +146,22 @@ export async function executePayOperation(
   return { ...result, outcome };
 }
 
-export function takePendingPayOperation(token: string): PendingOperation | null {
+export function takePendingPayOperation(
+  token: string,
+  caller: OperationPrincipal,
+): PendingOperation | null {
   purgeExpiredPendingOperations();
-  const operation = pendingOperations.get(token) ?? null;
-  if (operation) {
-    pendingOperations.delete(token);
+  const operation = pendingOperations.get(token);
+  if (!operation) {
+    return null;
   }
+  // principal binding: only the principal the token was minted for may redeem it.
+  // A mismatch is treated as not-found and does NOT consume the token, so a probe
+  // by another user cannot burn the real owner's pending operation.
+  if (!principalMatches(operation.principal, caller)) {
+    return null;
+  }
+  pendingOperations.delete(token);
   return operation;
 }
 
@@ -247,16 +274,17 @@ function validateProperty(schema: JsonRecord, value: unknown): boolean {
 }
 
 function rememberPendingOperation(operation: PendingOperation): string {
-  // TODO(security): v1 token is a monotonic counter + timestamp with NO principal
-  // binding, held in a single-daemon in-process map (spec 2026-07-01 §v1
-  // Implementation Boundaries). It is NOT a security boundary and is acceptable
-  // only for the mock-payment path. Before any non-mock operation, a second
-  // operation.kind, or multi-tenant use: switch to a CSPRNG token AND bind the
-  // entry to (accountId, senderId/chatId), verified in takePendingPayOperation.
-  pendingCounter += 1;
-  const token = `op_${Date.now().toString(36)}_${pendingCounter.toString(36)}`;
+  // CSPRNG token (unguessable / unenumerable) + principal binding on the stored
+  // entry are the two guards that make this token safe to hand out. The store is
+  // still in-process / single-daemon / TTL-bounded (spec 2026-07-01 §v1
+  // Implementation Boundaries) — those remain v1 constraints, not security holes.
+  const token = `op_${randomUUID()}`;
   pendingOperations.set(token, operation);
   return token;
+}
+
+function principalMatches(a: OperationPrincipal, b: OperationPrincipal): boolean {
+  return a.senderId === b.senderId && (a.accountId ?? "") === (b.accountId ?? "");
 }
 
 function purgeExpiredPendingOperations(now = Date.now()): void {
