@@ -27,6 +27,6 @@ export function createChromiteBridgeFallthroughHandler(options: {
       senderId: event.chatId,
       pluginConfig: options.pluginConfig,
     });
-    return { handled: true, reply: result.reply };
+    return { handled: true, reply: result.reply, interactive: result.interactive };
   };
 }

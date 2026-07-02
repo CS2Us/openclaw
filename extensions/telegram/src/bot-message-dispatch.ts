@@ -72,6 +72,7 @@ import {
 } from "./bot/native-quote.js";
 import type { TelegramStreamMode } from "./bot/types.js";
 import type { TelegramInlineButtons } from "./button-types.js";
+import { resolveTelegramInlineButtons } from "./button-types.js";
 import { createTelegramDraftStream } from "./draft-stream.js";
 import {
   buildTelegramErrorScopeKey,
@@ -81,6 +82,8 @@ import {
 } from "./error-policy.js";
 import { shouldSuppressLocalTelegramExecApprovalPrompt } from "./exec-approvals.js";
 import { markdownToTelegramChunks, renderTelegramHtmlText } from "./format.js";
+import { buildInlineKeyboard } from "./inline-keyboard.js";
+import { resolveTelegramInteractiveTextFallback } from "./interactive-fallback.js";
 import {
   createLaneDeliveryStateTracker,
   createLaneTextDeliverer,
@@ -973,9 +976,20 @@ export const dispatchTelegramMessage = async ({
           },
         });
         if (fallthroughResult.matched && fallthroughResult.handled) {
-          if (fallthroughResult.reply) {
+          const fallthroughReply = resolveTelegramInteractiveTextFallback({
+            text: fallthroughResult.reply,
+            interactive: fallthroughResult.interactive,
+          });
+          if (fallthroughReply) {
             try {
-              await bot.api.sendMessage(chatId, fallthroughResult.reply);
+              const buttons = resolveTelegramInlineButtons({
+                interactive: fallthroughResult.interactive,
+              });
+              await bot.api.sendMessage(
+                chatId,
+                fallthroughReply,
+                buttons ? { reply_markup: buildInlineKeyboard(buttons) } : undefined,
+              );
             } catch (err) {
               logVerbose(`inbound-fallthrough: failed to send reply: ${formatErrorMessage(err)}`);
             }

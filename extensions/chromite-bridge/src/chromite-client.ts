@@ -88,13 +88,65 @@ export type IdentityResolveResult = {
   provisional: boolean;
 };
 
+/** 客户端可渲染交互件（interaction-projection-v1）。 */
+export type EdgeLoopClientAction = {
+  kind: string;
+  version: number;
+  projection: unknown;
+};
+
 export type EdgeLoopResult = {
   reply: string;
   /** 跑了几轮 gateway turn。 */
   iterations: number;
   /** 是否因撞 maxTurns 上限退出（而非自然 end-of-turn）。 */
   hitMaxTurns: boolean;
+  /**
+   * interaction-projection-v1：core 收集的客户端可渲染交互件（如 `interaction_projection`）。
+   * secret 已在 core 从回喂 LLM 剥离；这些只随终态出。默认空。
+   */
+  clientActions: EdgeLoopClientAction[];
 };
+
+/**
+ * defensive 读 napi `EdgeLoopResultJs.clientActions`。napi crate 已加该字段，但 openclaw 侧
+ * binding（`@openclaw/chromite-native` 的 `.node` + `.d.ts`）**需重 build** 才可见——重生成前
+ * 该字段编译期不存在，故用 `unknown` narrowing 读，退化空数组；binding 重 build 后即真透传。
+ */
+function readClientActions(r: unknown): EdgeLoopClientAction[] {
+  if (typeof r !== "object" || r === null) {
+    return [];
+  }
+  const raw = (r as Record<string, unknown>).clientActions;
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  const out: EdgeLoopClientAction[] = [];
+  for (const a of raw) {
+    if (typeof a === "object" && a !== null) {
+      const rec = a as Record<string, unknown>;
+      const projection = decodeProjection(rec.projection);
+      if (typeof rec.kind === "string" && typeof rec.version === "number" && projection !== null) {
+        out.push({ kind: rec.kind, version: rec.version, projection });
+      }
+    }
+  }
+  return out;
+}
+
+function decodeProjection(raw: unknown): unknown | null {
+  if (typeof raw === "string") {
+    try {
+      return JSON.parse(raw) as unknown;
+    } catch {
+      return null;
+    }
+  }
+  if (typeof raw === "object" && raw !== null) {
+    return raw;
+  }
+  return null;
+}
 
 /** Marshal the bridge's `EdgeLoopOptions` onto the napi `EdgeLoopConfigJs`. */
 function toConfig(opts: EdgeLoopOptions): EdgeLoopConfigJs {
@@ -169,5 +221,6 @@ export async function runEdgeLoop(
     reply: r.reply,
     iterations: r.iterations,
     hitMaxTurns: r.hitMaxTurns,
+    clientActions: readClientActions(r),
   };
 }

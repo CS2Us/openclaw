@@ -17,6 +17,7 @@ import {
   type ChromiteBridgeConfig,
 } from "./config.js";
 import { truncate } from "./format.js";
+import { buildInteractionButtons, type ProjectionButtonsBlock } from "./projection-engine.js";
 
 const TELEGRAM_CHANNEL = "telegram";
 
@@ -41,6 +42,10 @@ export type BridgeHandlerInput = {
 
 export type BridgeHandlerResult = {
   reply: string;
+  /** Optional client-side interactive controls, e.g. buyer payment buttons. */
+  interactive?: {
+    blocks: ProjectionButtonsBlock[];
+  };
   /** chromite session_id used (caller can log for tracing). */
   sessionId: string;
 };
@@ -92,6 +97,7 @@ export async function dispatchChromiteRound(
   };
 
   let reply: string;
+  let interactionButtons: ProjectionButtonsBlock | null = null;
   try {
     // 1. Bind (channel, senderId) so the zero-trust commerce RPCs resolve.
     //    Guard for dev / CLI parity: fallthrough/command may lack senderId.
@@ -101,6 +107,7 @@ export async function dispatchChromiteRound(
     // 2. Drive the client-side agent loop.
     const result = await runEdgeLoop(text, sessionId, edgeOpts);
     reply = result.reply;
+    interactionButtons = buildInteractionButtons(result.clientActions);
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     const aborted = controller.signal.aborted;
@@ -116,6 +123,7 @@ export async function dispatchChromiteRound(
 
   return {
     reply: truncate(reply, maxReplyChars),
+    ...(interactionButtons ? { interactive: { blocks: [interactionButtons] } } : {}),
     sessionId,
   };
 }

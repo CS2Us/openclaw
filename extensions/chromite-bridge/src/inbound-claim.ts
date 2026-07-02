@@ -66,7 +66,13 @@ export function createChromiteBridgeInboundClaimHandler(
         senderId: event.senderId ?? chatId,
         pluginConfig: options.pluginConfig,
       });
-      return { handled: true, reply: { text: result.reply } };
+      return {
+        handled: true,
+        reply: {
+          text: result.reply,
+          interactive: result.interactive,
+        },
+      };
     } catch (err) {
       // claim 后失败：给用户一个 fallback reply 而不是悄悄丢消息（embedded agent
       // 在 commandAuthorized=false 时已被本 hook claim 排除，没有 fallback 路径）

@@ -43,5 +43,5 @@ async function handleChromiteCommand(
     senderId: ctx.senderId,
     pluginConfig: options.pluginConfig,
   });
-  return { text: result.reply };
+  return { text: result.reply, interactive: result.interactive };
 }

@@ -41,12 +41,31 @@ export interface EdgeLoopConfigJs {
 }
 
 /**
+ * Single client-renderable interaction (interaction-projection-v1). `projection`
+ * is a JSON string across the napi boundary (the bridge `JSON.parse`s it); the
+ * Rust core does not interpret it.
+ */
+export interface ClientActionJs {
+  kind: string;
+  version: number;
+  projection: string;
+}
+/**
  * `run_edge_loop` terminal result marshaled out.
  */
 export interface EdgeLoopResultJs {
   reply: string;
   iterations: number;
   hitMaxTurns: boolean;
+  /**
+   * interaction-projection-v1: client-renderable interactions collected by the
+   * core (e.g. `interaction_projection`). Secrets are already stripped from the
+   * LLM-fed result inside the core; these ride out only on the terminal result.
+   * Kept in sync with the Rust `EdgeLoopResultJs` (chromite-client-napi/src/lib.rs)
+   * and its generated `index.d.ts`; a stale copy silently degrades the live path
+   * to no buttons — guarded by chromite-native-binding.contract.test.ts.
+   */
+  clientActions: Array<ClientActionJs>;
 }
 
 /** `resolve` result marshaled out. */

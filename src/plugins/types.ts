@@ -2044,7 +2044,7 @@ export type PluginInboundFallthroughEvent<TChannel extends string = string> = {
 };
 
 export type PluginInboundFallthroughResult =
-  | { handled: true; reply?: string | null }
+  | { handled: true; reply?: string | null; interactive?: ReplyPayload["interactive"] }
   | { handled: false };
 
 export type PluginInboundFallthroughHandler<TChannel extends string = string> = (

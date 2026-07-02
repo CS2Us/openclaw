@@ -23,11 +23,18 @@ export type ChromiteBridgeConfig = {
    * commerce idempotency is in place. Env override: `CHROMITE_PENDING_STORE_DIR`.
    */
   pendingStoreDir?: string;
+  /**
+   * mock 支付网关 base URL（interaction-projection-v1 / checkout payment operation）。买家点支付
+   * 按钮后，callback 打 `{mockGatewayUrl}/v1/payment_intents/{id}/confirm`（MP-5：**禁**走
+   * chromite manual-confirm）。env override: `CHROMITE_MOCK_GATEWAY_URL`。缺省对齐 mock-gateway bin。
+   */
+  mockGatewayUrl?: string;
 };
 
 const DEFAULT_URL = "http://127.0.0.1:8080";
 const DEFAULT_MAX_REPLY_CHARS = 3500;
 const DEFAULT_TIMEOUT_MS = 300_000;
+const DEFAULT_MOCK_GATEWAY_URL = "http://127.0.0.1:8090";
 
 export function resolveChromiteUrl(config: ChromiteBridgeConfig): string {
   const envUrl = process.env.CHROMITE_BRIDGE_URL;
@@ -39,6 +46,18 @@ export function resolveChromiteUrl(config: ChromiteBridgeConfig): string {
     return fromConfig.replace(/\/+$/, "");
   }
   return DEFAULT_URL;
+}
+
+export function resolveMockGatewayUrl(config: ChromiteBridgeConfig): string {
+  const envUrl = process.env.CHROMITE_MOCK_GATEWAY_URL;
+  if (envUrl && envUrl.trim()) {
+    return envUrl.trim().replace(/\/+$/, "");
+  }
+  const fromConfig = config.mockGatewayUrl?.trim();
+  if (fromConfig) {
+    return fromConfig.replace(/\/+$/, "");
+  }
+  return DEFAULT_MOCK_GATEWAY_URL;
 }
 
 export function resolveMaxReplyChars(config: ChromiteBridgeConfig): number {

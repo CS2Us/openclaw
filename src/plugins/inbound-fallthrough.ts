@@ -2,6 +2,7 @@
 // extensions (e.g. telegram channel plugin) consume this to look up a
 // registered handler before invoking the default agent loop.
 
+import type { ReplyPayload } from "../auto-reply/reply-payload.js";
 import { resolvePluginInboundFallthroughHandler } from "./inbound-fallthrough-registry.js";
 import type { RegisteredInboundFallthroughHandler } from "./inbound-fallthrough-state.js";
 import type { PluginInboundFallthroughEvent, PluginInboundFallthroughResult } from "./types.js";
@@ -27,6 +28,7 @@ export type InboundFallthroughDispatchResult =
       matched: true;
       handled: boolean;
       reply: string | null;
+      interactive?: ReplyPayload["interactive"];
       registration: RegisteredInboundFallthroughHandler;
     };
 
@@ -60,6 +62,7 @@ export async function dispatchPluginInboundFallthroughHandler(params: {
       matched: true,
       handled: true,
       reply: result.reply ?? null,
+      interactive: result.interactive,
       registration,
     };
   }

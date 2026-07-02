@@ -47,6 +47,39 @@ describe("createChromiteBridgeInboundClaimHandler", () => {
     );
   });
 
+  it("preserves interactive checkout buttons in the claimed reply payload", async () => {
+    const interactive = {
+      blocks: [
+        {
+          type: "buttons" as const,
+          buttons: [
+            {
+              label: "确认支付",
+              value: "/chromite-pay op_test",
+              style: "primary" as const,
+            },
+          ],
+        },
+      ],
+    };
+    const dispatcher = vi.fn().mockResolvedValue({
+      reply: "请确认支付",
+      sessionId: "ses_test",
+      interactive,
+    } satisfies BridgeHandlerResult);
+    const handler = createChromiteBridgeInboundClaimHandler({ dispatcher });
+
+    const result = await handler(makeEvent(), ctx);
+
+    expect(result).toEqual({
+      handled: true,
+      reply: {
+        text: "请确认支付",
+        interactive,
+      },
+    });
+  });
+
   it("does NOT claim when channel != telegram (lets other plugins handle)", async () => {
     const dispatcher = makeDispatcher();
     const handler = createChromiteBridgeInboundClaimHandler({ dispatcher });
