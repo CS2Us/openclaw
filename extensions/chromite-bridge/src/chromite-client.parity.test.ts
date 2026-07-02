@@ -36,6 +36,7 @@ const FIXTURE_NAMES = [
   "single_commerce_tool_roundtrip",
   "fail_soft_401",
   "hit_max_turns",
+  "single_commerce_tool_with_client_action",
 ] as const;
 
 // ===== fixture schema (mirror of parity.rs build_exchanges / build_config) =====
@@ -55,6 +56,7 @@ type ExpectRequest = {
   headers?: Record<string, string>;
   body?: string;
   body_contains?: string;
+  body_not_contains?: string;
   body_roles?: string[];
 };
 
@@ -69,7 +71,12 @@ type Fixture = {
   user_msg: string;
   conv_id: string;
   exchanges: Exchange[];
-  expect: { reply: string; iterations: number; hit_max_turns: boolean };
+  expect: {
+    reply: string;
+    iterations: number;
+    hit_max_turns: boolean;
+    client_actions?: Array<{ kind: string; version: number; projection: unknown }>;
+  };
   expect_requests?: ExpectRequest[];
 };
 
@@ -184,6 +191,28 @@ async function runFixture(name: string): Promise<void> {
   expect(result.iterations, `[${name}] iterations`).toBe(fixture.expect.iterations);
   expect(result.hitMaxTurns, `[${name}] hit_max_turns`).toBe(fixture.expect.hit_max_turns);
 
+  // ===== 1b. client_actions parity (interaction-projection-v1) =====
+  // Present → deep-equal each {kind, version, projection}; absent → assert empty
+  // (existing fixtures produce none; a silently leaking sidechannel fails here).
+  // The napi boundary carries projection as an opaque JSON string; readClientActions
+  // has JSON.parse'd it back, so deep equality here proves the projection survived
+  // the Rust→JS marshalling intact (incl. secrets) through the REAL .node — this is
+  // the runtime stale-binding guard the .d.ts contract test cannot provide.
+  const expectedActions = fixture.expect.client_actions;
+  if (expectedActions) {
+    expect(result.clientActions, `[${name}] client_actions len`).toHaveLength(
+      expectedActions.length,
+    );
+    for (const [i, ea] of expectedActions.entries()) {
+      const got = result.clientActions[i];
+      expect(got.kind, `[${name}] client_actions[${i}].kind`).toBe(ea.kind);
+      expect(got.version, `[${name}] client_actions[${i}].version`).toBe(ea.version);
+      expect(got.projection, `[${name}] client_actions[${i}].projection`).toEqual(ea.projection);
+    }
+  } else {
+    expect(result.clientActions, `[${name}] client_actions should be empty`).toEqual([]);
+  }
+
   // ===== 2. recorded-request parity (path / headers / body / role sequence) =====
   // Node lowercases header names; fixtures use canonical case → compare lowercased.
   for (const [i, er] of (fixture.expect_requests ?? []).entries()) {
@@ -200,6 +229,10 @@ async function runFixture(name: string): Promise<void> {
     }
     if (typeof er.body_contains === "string") {
       expect(req.body, `[${name}] req#${i} body_contains`).toContain(er.body_contains);
+    }
+    if (typeof er.body_not_contains === "string") {
+      // e.g. secrets must not feed back to the LLM (interaction-projection-v1)
+      expect(req.body, `[${name}] req#${i} body_not_contains`).not.toContain(er.body_not_contains);
     }
     if (er.body_roles) {
       const parsed = JSON.parse(req.body) as { messages: Array<{ role: string }> };
