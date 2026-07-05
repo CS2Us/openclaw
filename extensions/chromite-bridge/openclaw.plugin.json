@@ -27,6 +27,12 @@
         "default": 300000,
         "description": "Max ms to keep SSE connection alive before aborting."
       },
+      "interactionRuntimeMode": {
+        "type": "string",
+        "enum": ["local-b3", "chromite-b1"],
+        "default": "local-b3",
+        "description": "Interaction projection runtime. Default local-b3 preserves the current Telegram mock button path; chromite-b1 redeems backend operation_token through chromite."
+      },
       "sellerTelegramUserIds": {
         "type": "array",
         "items": { "type": "string" },

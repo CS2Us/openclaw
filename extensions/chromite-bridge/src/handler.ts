@@ -11,6 +11,7 @@ import { chatStateKey, getOrCreateChatState, markUsed } from "./chat-state.js";
 import { resolveIdentity, runEdgeLoop } from "./chromite-client.js";
 import {
   resolveChromiteUrl,
+  resolveInteractionRuntimeMode,
   resolveMaxReplyChars,
   resolvePendingStoreDir,
   resolveRequestTimeoutMs,
@@ -66,6 +67,7 @@ export async function dispatchChromiteRound(
   const chromiteUrl = resolveChromiteUrl(config);
   const maxReplyChars = resolveMaxReplyChars(config);
   const timeoutMs = resolveRequestTimeoutMs(config);
+  const interactionRuntimeMode = resolveInteractionRuntimeMode(config);
   // OPT-IN durable resilience (chromite sub-spec ④ R1): undefined unless an
   // operator sets CHROMITE_PENDING_STORE_DIR / plugin config. When set, the
   // native loop restores an interrupted session on the next round with the same
@@ -109,10 +111,16 @@ export async function dispatchChromiteRound(
     reply = result.reply;
     // Bind the pending-operation tokens to this round's principal (bot account +
     // channel sender), so only the same user can redeem them via /chromite-pay.
-    interactionButtons = buildInteractionButtons(result.clientActions, {
-      accountId: input.accountId,
-      senderId: input.senderId ?? "",
-    });
+    interactionButtons = buildInteractionButtons(
+      result.clientActions,
+      {
+        accountId: input.accountId,
+        senderId: input.senderId ?? "",
+      },
+      {
+        runtimeMode: interactionRuntimeMode,
+      },
+    );
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     const aborted = controller.signal.aborted;

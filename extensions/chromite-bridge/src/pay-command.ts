@@ -10,6 +10,8 @@ import type {
   PluginCommandResult,
 } from "openclaw/plugin-sdk/plugin-entry";
 import {
+  resolveChromiteUrl,
+  resolveInteractionRuntimeMode,
   resolveMockGatewayUrl,
   resolveRequestTimeoutMs,
   type ChromiteBridgeConfig,
@@ -50,6 +52,28 @@ async function handlePayCommand(
     // Redeem bound to the caller principal — the pending token only executes for
     // the same (accountId, senderId) it was minted for (projection-engine).
     const caller = { accountId: ctx.accountId, senderId: ctx.senderId ?? "" };
+    if (resolveInteractionRuntimeMode(cfg) === "chromite-b1") {
+      const result = await redeemChromiteOperation(
+        parsed.token,
+        resolveChromiteUrl(cfg),
+        ctx.channel ?? "telegram",
+        caller.senderId,
+        fetchImpl,
+      );
+      if (result.status === "redeemed") {
+        const states = [
+          result.paymentState ? `Payment=${result.paymentState}` : undefined,
+          result.orderState ? `Order=${result.orderState}` : undefined,
+        ]
+          .filter(Boolean)
+          .join(" / ");
+        return {
+          text: `✅ 支付操作已提交${states ? `（${states}）` : ""}。`,
+        };
+      }
+      return { text: `❌ 支付操作不可用：${result.message}` };
+    }
+
     const result = await executePayOperation(
       parsed.token,
       resolveMockGatewayUrl(cfg),
@@ -75,4 +99,67 @@ async function handlePayCommand(
   } finally {
     clearTimeout(timer);
   }
+}
+
+type ChromiteRedeemResult = {
+  status: "redeemed" | "unavailable" | "rejected";
+  message: string;
+  paymentState?: string;
+  orderState?: string;
+};
+
+async function redeemChromiteOperation(
+  token: string,
+  chromiteUrl: string,
+  channel: string,
+  senderId: string,
+  fetchImpl: typeof fetch,
+): Promise<ChromiteRedeemResult> {
+  const base = chromiteUrl.replace(/\/+$/, "");
+  const resp = await fetchImpl(`${base}/v1/interaction/operations/redeem`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-channel": channel,
+      "x-session-token": senderId,
+    },
+    body: JSON.stringify({
+      kind: "interaction_operation_redeem",
+      version: 1,
+      token,
+    }),
+  });
+  const body = await readJsonRecord(resp);
+  if (!resp.ok) {
+    const message = readString(body.message) ?? readString(body.error) ?? `HTTP ${resp.status}`;
+    throw new Error(message);
+  }
+  const result = isRecord(body.result) ? body.result : {};
+  const status = readString(result.status);
+  if (status !== "redeemed" && status !== "unavailable" && status !== "rejected") {
+    throw new Error("chromite redeem response is invalid");
+  }
+  return {
+    status,
+    message: readString(result.message) ?? "operation result missing message",
+    paymentState: readString(result.payment_state) ?? undefined,
+    orderState: readString(result.order_state) ?? undefined,
+  };
+}
+
+async function readJsonRecord(resp: Response): Promise<Record<string, unknown>> {
+  try {
+    const body = (await resp.json()) as unknown;
+    return isRecord(body) ? body : {};
+  } catch {
+    return {};
+  }
+}
+
+function readString(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

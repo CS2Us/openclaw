@@ -1,6 +1,7 @@
 /** Interaction Projection Protocol v1 renderer/executor for chromite-bridge. */
 
 import { randomUUID } from "node:crypto";
+import type { InteractionRuntimeMode } from "./config.js";
 
 export type ClientAction = {
   kind: string;
@@ -53,6 +54,7 @@ const pendingOperations = new Map<string, PendingOperation>();
 export function buildInteractionButtons(
   clientActions: ClientAction[] | undefined,
   principal: OperationPrincipal,
+  options: { runtimeMode?: InteractionRuntimeMode } = {},
 ): ProjectionButtonsBlock | null {
   const action = (clientActions ?? []).find((a) => a.kind === "interaction_projection");
   if (!action) {
@@ -90,19 +92,20 @@ export function buildInteractionButtons(
       continue;
     }
 
-    const params = resolveOperationParams(projection, operation);
-    if (!params || !validateParamsSchema(operation.params_schema, params)) {
+    const runtimeMode = options.runtimeMode ?? "local-b3";
+    const token =
+      runtimeMode === "chromite-b1"
+        ? readString(item.operation_token)
+        : rememberLocalPendingOperation(projection, operation, {
+            actionId,
+            operationRef,
+            kind,
+            createdAtMs: Date.now(),
+            principal,
+          });
+    if (!token) {
       continue;
     }
-
-    const token = rememberPendingOperation({
-      actionId,
-      operationRef,
-      kind,
-      params,
-      createdAtMs: Date.now(),
-      principal,
-    });
 
     buttons.push({
       label,
@@ -112,6 +115,18 @@ export function buildInteractionButtons(
   }
 
   return buttons.length > 0 ? { type: "buttons", buttons } : null;
+}
+
+function rememberLocalPendingOperation(
+  projection: JsonRecord,
+  operation: JsonRecord,
+  base: Omit<PendingOperation, "params">,
+): string | null {
+  const params = resolveOperationParams(projection, operation);
+  if (!params || !validateParamsSchema(operation.params_schema, params)) {
+    return null;
+  }
+  return rememberPendingOperation({ ...base, params });
 }
 
 export function parsePayConfirm(value: string): { token: string } | null {

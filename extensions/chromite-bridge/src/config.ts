@@ -6,6 +6,15 @@ export type ChromiteBridgeConfig = {
   maxReplyChars?: number;
   requestTimeoutMs?: number;
   /**
+   * Interaction runtime for projection buttons.
+   *
+   * `local-b3` preserves the current OpenClaw in-process pending-operation map.
+   * `chromite-b1` uses backend `action.operation_token` and redeems through
+   * Chromite. Keep live Telegram on `local-b3` until the cutover human_gate.
+   * Env override: `CHROMITE_INTERACTION_RUNTIME_MODE`.
+   */
+  interactionRuntimeMode?: InteractionRuntimeMode;
+  /**
    * @deprecated rbac-v1 (spec docs/specs/2026-05-29-chromite-identity-rbac-v1.md):
    * seller 鉴权已下沉到 chromite (users.role='seller')。此白名单不再被 `/confirm` 消费，
    * 保留仅为配置向后兼容，可安全移除。原 v1 设计见
@@ -31,10 +40,13 @@ export type ChromiteBridgeConfig = {
   mockGatewayUrl?: string;
 };
 
+export type InteractionRuntimeMode = "local-b3" | "chromite-b1";
+
 const DEFAULT_URL = "http://127.0.0.1:8080";
 const DEFAULT_MAX_REPLY_CHARS = 3500;
 const DEFAULT_TIMEOUT_MS = 300_000;
 const DEFAULT_MOCK_GATEWAY_URL = "http://127.0.0.1:8090";
+const DEFAULT_INTERACTION_RUNTIME_MODE: InteractionRuntimeMode = "local-b3";
 
 export function resolveChromiteUrl(config: ChromiteBridgeConfig): string {
   const envUrl = process.env.CHROMITE_BRIDGE_URL;
@@ -68,6 +80,23 @@ export function resolveMaxReplyChars(config: ChromiteBridgeConfig): number {
 export function resolveRequestTimeoutMs(config: ChromiteBridgeConfig): number {
   const v = config.requestTimeoutMs;
   return typeof v === "number" && v > 0 ? v : DEFAULT_TIMEOUT_MS;
+}
+
+export function resolveInteractionRuntimeMode(
+  config: ChromiteBridgeConfig,
+): InteractionRuntimeMode {
+  const envMode = process.env.CHROMITE_INTERACTION_RUNTIME_MODE;
+  if (isInteractionRuntimeMode(envMode)) {
+    return envMode;
+  }
+  if (isInteractionRuntimeMode(config.interactionRuntimeMode)) {
+    return config.interactionRuntimeMode;
+  }
+  return DEFAULT_INTERACTION_RUNTIME_MODE;
+}
+
+function isInteractionRuntimeMode(value: unknown): value is InteractionRuntimeMode {
+  return value === "local-b3" || value === "chromite-b1";
 }
 
 /**

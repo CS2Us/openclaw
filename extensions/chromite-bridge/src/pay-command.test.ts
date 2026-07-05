@@ -67,6 +67,52 @@ beforeEach(() => {
 });
 
 describe("createPayCommand", () => {
+  it("B1 opt-in redeems backend token through chromite with zero-trust headers", async () => {
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            kind: "interaction_operation_result",
+            version: 1,
+            result: {
+              status: "redeemed",
+              message: "operation redeemed",
+              payment_state: "Success",
+              order_state: "Paid",
+            },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+    );
+    const cmd = createPayCommand({
+      pluginConfig: {
+        chromiteUrl: "http://chromite",
+        interactionRuntimeMode: "chromite-b1",
+        mockGatewayUrl: "http://mock-gw-should-not-be-used",
+      },
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+
+    const result = (await cmd.handler(makeCtx({ args: "op_backend" }))) as PluginCommandResult;
+
+    expect(result.text).toContain("支付操作已提交");
+    expect(result.text).toContain("Payment=Success");
+    const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe("http://chromite/v1/interaction/operations/redeem");
+    expect(init.method).toBe("POST");
+    expect(init.headers).toMatchObject({
+      "content-type": "application/json",
+      "x-channel": "telegram",
+      "x-session-token": "12345",
+    });
+    expect(JSON.parse(String(init.body))).toEqual({
+      kind: "interaction_operation_redeem",
+      version: 1,
+      token: "op_backend",
+    });
+    expect(JSON.stringify(init)).not.toContain("mock-gw-should-not-be-used");
+  });
+
   it("confirms a buyer payment intent through mock-gateway using an opaque token", async () => {
     const token = seedPaymentProjection("succeed");
     const fetchImpl = vi.fn(async () => new Response(null, { status: 200 }));

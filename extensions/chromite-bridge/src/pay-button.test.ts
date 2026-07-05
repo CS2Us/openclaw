@@ -32,12 +32,14 @@ function projectionAction(overrides: Record<string, unknown> = {}): ClientAction
         intent: "primary",
         style: { tone: "success" },
         operation_ref: "op_confirm_payment",
+        operation_token: "op_backend_success",
       },
       {
         id: "simulate_payment_failure",
         label: "模拟失败",
         intent: "secondary",
         operation_ref: "op_simulate_payment_failure",
+        operation_token: "op_backend_failure",
       },
     ],
     operations: {
@@ -91,6 +93,46 @@ describe("buildInteractionButtons", () => {
     expect(block!.buttons[0].label).toBe("确认支付");
     expect(block!.buttons[0].value).toMatch(new RegExp(`^${PAY_CONFIRM_COMMAND} op_`));
     expect(block!.buttons[1].value).toMatch(new RegExp(`^${PAY_CONFIRM_COMMAND} op_`));
+  });
+
+  it("B1 opt-in renders backend operation_token without storing local params", async () => {
+    const block = buildInteractionButtons([projectionAction()], PRINCIPAL, {
+      runtimeMode: "chromite-b1",
+    });
+
+    expect(block).not.toBeNull();
+    expect(block!.buttons.map((b) => b.value)).toEqual([
+      `${PAY_CONFIRM_COMMAND} op_backend_success`,
+      `${PAY_CONFIRM_COMMAND} op_backend_failure`,
+    ]);
+    await expect(
+      executePayOperation(
+        "op_backend_success",
+        "http://gw",
+        PRINCIPAL,
+        vi.fn(async () => new Response(null, { status: 200 })) as unknown as typeof fetch,
+      ),
+    ).rejects.toThrow(/not found or expired/);
+  });
+
+  it("B1 opt-in skips actions without backend operation_token", () => {
+    const block = buildInteractionButtons(
+      [
+        projectionAction({
+          actions: [
+            {
+              id: "confirm_payment",
+              label: "确认支付",
+              operation_ref: "op_confirm_payment",
+            },
+          ],
+        }),
+      ],
+      PRINCIPAL,
+      { runtimeMode: "chromite-b1" },
+    );
+
+    expect(block).toBeNull();
   });
 
   it("SECRET DISCIPLINE: button values never include params or secrets", () => {
