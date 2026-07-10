@@ -43,5 +43,13 @@ async function handleChromiteCommand(
     senderId: ctx.senderId,
     pluginConfig: options.pluginConfig,
   });
-  return { text: result.reply, interactive: result.interactive };
+  return {
+    text: result.reply,
+    interactive: result.interactive,
+    // C-lite personal QR: attach seller payment QR image when present
+    // (live-only media, do not persist the reference).
+    ...(result.mediaUrl
+      ? { mediaUrl: result.mediaUrl, sensitiveMedia: result.sensitiveMedia }
+      : {}),
+  };
 }

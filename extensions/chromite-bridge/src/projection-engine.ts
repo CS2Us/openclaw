@@ -117,6 +117,77 @@ export function buildInteractionButtons(
   return buttons.length > 0 ? { type: "buttons", buttons } : null;
 }
 
+/**
+ * Minimal presentation-profile dispatch (interaction-projection-v1 §v1
+ * boundaries deferred item; trigger = C-lite personal QR,
+ * spec chromite-personal-qr-openclaw-wiring-v1).
+ *
+ * Behavior-preserving order:
+ *   1. Buttons first — any allowlisted action renders exactly as before
+ *      (confirm.v1 / B3 / B1 output byte-identical via buildInteractionButtons).
+ *   2. No buttons + known render-only profile → profile-specific descriptor.
+ *   3. No buttons + unknown non-empty profile → "unsupported" (text degrade;
+ *      fixes the silent-invisible gap for future profiles).
+ *   4. No projection at all → "none".
+ */
+export type ProjectionRender =
+  | { kind: "buttons"; block: ProjectionButtonsBlock }
+  | {
+      kind: "personal_qr";
+      qrRef: string;
+      contentType: string | null;
+      instructions: string;
+      amountCents: number | null;
+    }
+  | { kind: "unsupported"; profile: string }
+  | { kind: "none" };
+
+export const PERSONAL_QR_PROFILE = "checkout.payment.personal_qr.v1";
+
+export function renderProjection(
+  clientActions: ClientAction[] | undefined,
+  principal: OperationPrincipal,
+  options: { runtimeMode?: InteractionRuntimeMode } = {},
+): ProjectionRender {
+  const buttons = buildInteractionButtons(clientActions, principal, options);
+  if (buttons) {
+    return { kind: "buttons", block: buttons };
+  }
+
+  const action = (clientActions ?? []).find((a) => a.kind === "interaction_projection");
+  if (!action || action.version !== 1 || !isRecord(action.projection)) {
+    return { kind: "none" };
+  }
+  const projection = action.projection;
+  const presentation = isRecord(projection.presentation) ? projection.presentation : {};
+  const profile = readString(presentation.profile);
+  if (!profile) {
+    return { kind: "none" };
+  }
+
+  if (profile === PERSONAL_QR_PROFILE) {
+    const sellerPayment = isRecord(presentation.seller_payment) ? presentation.seller_payment : {};
+    const qrRef = readString(sellerPayment.qr_ref);
+    // Backend-owned contract: mode + qr_ref must both be present; anything else
+    // is a malformed projection → degrade to "unsupported" rather than guessing.
+    if (sellerPayment.mode !== "personal_qr_clite" || !qrRef) {
+      return { kind: "unsupported", profile };
+    }
+    const amount = isRecord(presentation.amount) ? presentation.amount : {};
+    return {
+      kind: "personal_qr",
+      qrRef,
+      contentType: readString(sellerPayment.qr_content_type),
+      instructions:
+        readString(sellerPayment.instructions) ??
+        "请扫码向卖家直接付款；卖家确认收款后订单继续推进。",
+      amountCents: typeof amount.value_cents === "number" ? amount.value_cents : null,
+    };
+  }
+
+  return { kind: "unsupported", profile };
+}
+
 function rememberLocalPendingOperation(
   projection: JsonRecord,
   operation: JsonRecord,

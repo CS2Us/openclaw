@@ -19,11 +19,14 @@ import type {
   PluginHookInboundClaimResult,
 } from "openclaw/plugin-sdk/plugin-runtime";
 import { dispatchChromiteRound } from "./handler.js";
+import { handleQrUpload, matchQrUploadRequest } from "./qr-upload.js";
 
 export type ChromiteBridgeInboundClaimOptions = {
   pluginConfig?: unknown;
   /** Test seam —— allow swapping dispatcher for unit tests. */
   dispatcher?: typeof dispatchChromiteRound;
+  /** Test seam —— allow swapping the QR uploader for unit tests. */
+  qrUploader?: typeof handleQrUpload;
 };
 
 export function createChromiteBridgeInboundClaimHandler(
@@ -33,6 +36,7 @@ export function createChromiteBridgeInboundClaimHandler(
   ctx: PluginHookInboundClaimContext,
 ) => Promise<PluginHookInboundClaimResult | undefined> {
   const dispatcher = options.dispatcher ?? dispatchChromiteRound;
+  const qrUploader = options.qrUploader ?? handleQrUpload;
   return async (event, _ctx) => {
     // 只接 telegram channel；其它 channel 不 claim
     if (event.channel !== "telegram") {
@@ -41,6 +45,20 @@ export function createChromiteBridgeInboundClaimHandler(
     // 群聊 v1 不接（chromite-bridge 设计是 1-on-1 DM；resolution-middleware-v1 §2 #D 同样假设）
     if (event.isGroup) {
       return undefined;
+    }
+    // C-lite 卖家收款码上传（spec chromite-personal-qr-openclaw-wiring-v1）：
+    // photo + caption `/chromite-qr`。命令路径收不到媒体（PluginCommandContext 无
+    // media 字段），媒体只在 claim 事件 metadata 里，所以这个分支必须在
+    // commandAuthorized guard **之前**（caption 形如命令时不能让命令系统吞掉）。
+    // 授权判定 100% 在 chromite rbac（非 Seller → 403 文案透传）。
+    const qrRequest = matchQrUploadRequest(event);
+    if (qrRequest) {
+      const receipt = await qrUploader({
+        senderId: event.senderId ?? event.conversationId ?? "",
+        request: qrRequest,
+        pluginConfig: options.pluginConfig,
+      });
+      return { handled: true, reply: { text: receipt } };
     }
     // `/chromite` / `/confirm` / `/register` 走 registerCommand 注册的命令路径，
     // 不 claim 让命令系统接管。
@@ -71,6 +89,11 @@ export function createChromiteBridgeInboundClaimHandler(
         reply: {
           text: result.reply,
           interactive: result.interactive,
+          // C-lite personal QR: attach seller payment QR image when present
+          // (live-only media, do not persist the reference).
+          ...(result.mediaUrl
+            ? { mediaUrl: result.mediaUrl, sensitiveMedia: result.sensitiveMedia }
+            : {}),
         },
       };
     } catch (err) {

@@ -18,7 +18,8 @@ import {
   type ChromiteBridgeConfig,
 } from "./config.js";
 import { truncate } from "./format.js";
-import { buildInteractionButtons, type ProjectionButtonsBlock } from "./projection-engine.js";
+import { decorateReplyWithProjection } from "./personal-qr-render.js";
+import { renderProjection, type ProjectionButtonsBlock } from "./projection-engine.js";
 
 const TELEGRAM_CHANNEL = "telegram";
 
@@ -47,6 +48,15 @@ export type BridgeHandlerResult = {
   interactive?: {
     blocks: ProjectionButtonsBlock[];
   };
+  /**
+   * C-lite personal QR (spec chromite-personal-qr-openclaw-wiring-v1): media
+   * to attach to the reply (seller payment QR image URL on chromite). Callers
+   * whose reply surface supports ReplyPayload should pass it through as
+   * `mediaUrl` + `sensitiveMedia: true` (live-only, do not persist the media
+   * reference — it is a payment collection code).
+   */
+  mediaUrl?: string;
+  sensitiveMedia?: boolean;
   /** chromite session_id used (caller can log for tracing). */
   sessionId: string;
 };
@@ -100,6 +110,8 @@ export async function dispatchChromiteRound(
 
   let reply: string;
   let interactionButtons: ProjectionButtonsBlock | null = null;
+  let mediaUrl: string | undefined;
+  let sensitiveMedia: boolean | undefined;
   try {
     // 1. Bind (channel, senderId) so the zero-trust commerce RPCs resolve.
     //    Guard for dev / CLI parity: fallthrough/command may lack senderId.
@@ -111,7 +123,7 @@ export async function dispatchChromiteRound(
     reply = result.reply;
     // Bind the pending-operation tokens to this round's principal (bot account +
     // channel sender), so only the same user can redeem them via /chromite-pay.
-    interactionButtons = buildInteractionButtons(
+    const render = renderProjection(
       result.clientActions,
       {
         accountId: input.accountId,
@@ -121,6 +133,17 @@ export async function dispatchChromiteRound(
         runtimeMode: interactionRuntimeMode,
       },
     );
+    const decorated = await decorateReplyWithProjection({
+      reply,
+      render,
+      chromiteUrl,
+      fetchImpl: input.fetchImpl ?? fetch,
+      signal: controller.signal,
+    });
+    reply = decorated.reply;
+    interactionButtons = decorated.buttons;
+    mediaUrl = decorated.mediaUrl;
+    sensitiveMedia = decorated.sensitiveMedia;
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     const aborted = controller.signal.aborted;
@@ -137,6 +160,7 @@ export async function dispatchChromiteRound(
   return {
     reply: truncate(reply, maxReplyChars),
     ...(interactionButtons ? { interactive: { blocks: [interactionButtons] } } : {}),
+    ...(mediaUrl ? { mediaUrl, sensitiveMedia } : {}),
     sessionId,
   };
 }
