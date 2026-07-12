@@ -30,7 +30,7 @@ export async function decorateReplyWithProjection(options: {
       // know the code is missing, not silently see plain text); outbound
       // delivery re-fetches the URL (loopback double-fetch is negligible).
       const base = options.chromiteUrl.replace(/\/+$/, "");
-      const qrUrl = `${base}/v1/commerce/seller-payment-qr/${encodeURIComponent(render.qrRef)}`;
+      const qrUrl = `${base}/v1/assets/seller-payment-qr/${encodeURIComponent(render.qrRef)}`;
       let qrOk = false;
       try {
         const probe = await options.fetchImpl(qrUrl, { signal: options.signal });

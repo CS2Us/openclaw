@@ -111,7 +111,7 @@ describe("createConfirmCommand", () => {
 
     expect(fetchImpl).toHaveBeenCalledOnce();
     const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
-    expect(url).toBe("http://test:8080/v1/commerce/manual-confirm");
+    expect(url).toBe("http://test:8080/v1/sellers/manual-confirm");
     expect(init.method).toBe("POST");
     const body = JSON.parse(init.body as string) as Record<string, unknown>;
     expect(body.order_id).toBe("o_test");

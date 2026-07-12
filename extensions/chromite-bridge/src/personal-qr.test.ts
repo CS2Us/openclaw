@@ -122,7 +122,7 @@ describe("decorateReplyWithProjection (personal_qr)", () => {
       fetchImpl,
     });
     expect(out.mediaUrl).toBe(
-      "http://127.0.0.1:8080/v1/commerce/seller-payment-qr/0b5a1c9e-6f2d-4f7a-9e2b-000000000001",
+      "http://127.0.0.1:8080/v1/assets/seller-payment-qr/0b5a1c9e-6f2d-4f7a-9e2b-000000000001",
     );
     expect(out.sensitiveMedia).toBe(true);
     expect(out.buttons).toBeNull();

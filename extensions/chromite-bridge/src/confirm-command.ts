@@ -3,7 +3,7 @@
 //
 // Flow:
 //   seller DMs `@bot /confirm <order-id> <payment-id>`
-//   → POST chromite /v1/commerce/manual-confirm (seller_id = senderId)
+//   → POST chromite /v1/sellers/manual-confirm (seller_id = senderId；routing-contract-v1 §4#2 canonical)
 //   → chromite resolves seller_id → users.role; 非 Seller → 403 (rbac-v1)
 //   → reply with payment / order state, or surface chromite's 403 message
 //
@@ -65,7 +65,7 @@ async function handleConfirmCommand(
   }
   const [orderId, paymentId] = parts;
 
-  const url = `${resolveChromiteUrl(cfg)}/v1/commerce/manual-confirm`;
+  const url = `${resolveChromiteUrl(cfg)}/v1/sellers/manual-confirm`;
   const fetchFn = options.fetchImpl ?? fetch;
   const timeoutMs = resolveRequestTimeoutMs(cfg);
 
