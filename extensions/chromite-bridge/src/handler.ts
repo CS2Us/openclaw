@@ -20,6 +20,7 @@ import {
 import { truncate } from "./format.js";
 import { decorateReplyWithProjection } from "./personal-qr-render.js";
 import { renderProjection, type ProjectionButtonsBlock } from "./projection-engine.js";
+import { extractOrderRef, getRelayPush } from "./relay-push.js";
 
 const TELEGRAM_CHANNEL = "telegram";
 
@@ -144,6 +145,26 @@ export async function dispatchChromiteRound(
     interactionButtons = decorated.buttons;
     mediaUrl = decorated.mediaUrl;
     sensitiveMedia = decorated.sensitiveMedia;
+    // Buyer was shown a payment card → register interest in the ORDER_PAID
+    // push for this order (spec chromite-relay-push-consumer-v1). Side
+    // channel: must never affect the reply path.
+    if (render.kind === "personal_qr") {
+      try {
+        const orderRef = extractOrderRef(result.clientActions);
+        if (orderRef) {
+          getRelayPush()?.subscribeOrder({
+            orderId: orderRef.orderId,
+            accountId: input.accountId,
+            chatId: input.chatId,
+            // Buyer identity for the zero-trust relay ticket fetch
+            // (chromite-relay-session-auth-v1).
+            senderId: input.senderId,
+          });
+        }
+      } catch {
+        // subscribeOrder already logs; nothing to surface into the reply.
+      }
+    }
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     const aborted = controller.signal.aborted;

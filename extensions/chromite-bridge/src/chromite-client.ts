@@ -204,6 +204,50 @@ export async function resolveIdentity(opts: EdgeLoopOptions): Promise<IdentityRe
   return { userId: r.userId, provisional: r.provisional };
 }
 
+// ===== relay ticket (chromite-relay-session-auth-v1) =====
+
+/**
+ * POST /v1/relay/tickets —— 换取买家订阅 relay push 的 60s HS256 join ticket。
+ *
+ * server 侧过零信任 layer（X-Session-Token = 买家 channel_user_id）+ 买家归属授权
+ * （ConvAuthorizer）后签票。**永不抛**：任何失败（网络 / 401 / 403 / 503 / 缺
+ * senderId）返回 null，调用方（relay-push join）留给 ensure-joined 重试环，
+ * fail-visible 不静默。
+ */
+export async function fetchRelayTicket(params: {
+  chromiteUrl: string;
+  orderId: string;
+  senderId: string;
+  fetchImpl?: typeof fetch;
+  signal?: AbortSignal;
+}): Promise<string | null> {
+  const { chromiteUrl, orderId, senderId } = params;
+  if (!senderId) {
+    return null;
+  }
+  const fetchFn = params.fetchImpl ?? fetch;
+  const url = `${chromiteUrl.replace(/\/+$/, "")}/v1/relay/tickets`;
+  try {
+    const resp = await fetchFn(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Session-Token": senderId,
+        "X-Channel": TELEGRAM_CHANNEL,
+      },
+      body: JSON.stringify({ conv_id: orderId }),
+      signal: params.signal,
+    });
+    if (!resp.ok) {
+      return null;
+    }
+    const parsed = (await resp.json()) as { ticket?: unknown };
+    return typeof parsed.ticket === "string" ? parsed.ticket : null;
+  } catch {
+    return null;
+  }
+}
+
 // ===== edge agent loop =====
 
 /**

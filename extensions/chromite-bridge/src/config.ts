@@ -38,6 +38,19 @@ export type ChromiteBridgeConfig = {
    * chromite manual-confirm）。env override: `CHROMITE_MOCK_GATEWAY_URL`。缺省对齐 mock-gateway bin。
    */
   mockGatewayUrl?: string;
+  /**
+   * Relay (Phoenix) websocket base URL for server-push consumption
+   * (spec chromite-relay-push-consumer-v1). Loopback-only deployment — the
+   * relay frame_channel has no auth yet (public exposure is a human_gate).
+   * Env override: `CHROMITE_RELAY_URL`.
+   */
+  relayUrl?: string;
+  /**
+   * Master switch for the relay push consumer. Default true; the socket is
+   * lazy — nothing connects until a personal-QR payment card is rendered.
+   * Env override: `CHROMITE_RELAY_PUSH_ENABLED` ("0"/"false" disables).
+   */
+  relayPushEnabled?: boolean;
 };
 
 export type InteractionRuntimeMode = "local-b3" | "chromite-b1";
@@ -47,6 +60,7 @@ const DEFAULT_MAX_REPLY_CHARS = 3500;
 const DEFAULT_TIMEOUT_MS = 300_000;
 const DEFAULT_MOCK_GATEWAY_URL = "http://127.0.0.1:8090";
 const DEFAULT_INTERACTION_RUNTIME_MODE: InteractionRuntimeMode = "local-b3";
+const DEFAULT_RELAY_URL = "ws://127.0.0.1:4000";
 
 export function resolveChromiteUrl(config: ChromiteBridgeConfig): string {
   const envUrl = process.env.CHROMITE_BRIDGE_URL;
@@ -58,6 +72,26 @@ export function resolveChromiteUrl(config: ChromiteBridgeConfig): string {
     return fromConfig.replace(/\/+$/, "");
   }
   return DEFAULT_URL;
+}
+
+export function resolveRelayUrl(config: ChromiteBridgeConfig): string {
+  const envUrl = process.env.CHROMITE_RELAY_URL;
+  if (envUrl && envUrl.trim()) {
+    return envUrl.trim().replace(/\/+$/, "");
+  }
+  const fromConfig = config.relayUrl?.trim();
+  if (fromConfig) {
+    return fromConfig.replace(/\/+$/, "");
+  }
+  return DEFAULT_RELAY_URL;
+}
+
+export function resolveRelayPushEnabled(config: ChromiteBridgeConfig): boolean {
+  const env = process.env.CHROMITE_RELAY_PUSH_ENABLED;
+  if (env !== undefined && env.trim() !== "") {
+    return env.trim() !== "0" && env.trim().toLowerCase() !== "false";
+  }
+  return config.relayPushEnabled !== false;
 }
 
 export function resolveMockGatewayUrl(config: ChromiteBridgeConfig): string {
