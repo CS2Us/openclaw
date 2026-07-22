@@ -1,0 +1,22 @@
+{
+  "name": "@openclaw/agent-overnight",
+  "version": "0.1.0",
+  "description": "Run a capability-gated local provider unattended with auto-resume.",
+  "type": "module",
+  "devDependencies": {
+    "@openclaw/plugin-sdk": "workspace:*"
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ],
+    "build": {
+      "staticAssets": [
+        {
+          "source": "scripts/overnight-supervisor.cjs",
+          "output": "scripts/overnight-supervisor.cjs"
+        }
+      ]
+    }
+  }
+}

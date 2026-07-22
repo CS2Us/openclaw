@@ -1,0 +1,61 @@
+{
+  "id": "agent-bridge",
+  "name": "Agent Bridge",
+  "description": "Forward chat /agent commands to an explicitly configured local provider adapter.",
+  "activation": {
+    "onStartup": true
+  },
+  "contracts": {
+    "commands": ["agent"]
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "projectCwd": {
+        "type": "string",
+        "description": "Absolute path to the project directory where the selected agent runs. Falls back to env OPENCLAW_AGENT_BRIDGE_CWD."
+      },
+      "provider": {
+        "type": "string",
+        "enum": ["claude", "codex", "gemini"],
+        "default": "claude",
+        "description": "Explicit provider adapter. Changing it never reuses another provider's private session id."
+      },
+      "agentBin": {
+        "type": "string",
+        "description": "Name or absolute path of the selected provider CLI. Defaults by provider."
+      },
+      "model": {
+        "type": "string",
+        "description": "Optional provider model id passed only through that provider's adapter."
+      },
+      "reasoningEffort": {
+        "type": "string",
+        "enum": ["low", "medium", "high"],
+        "default": "high",
+        "description": "Requested reasoning effort when supported by the selected adapter."
+      },
+      "capabilityMode": {
+        "type": "string",
+        "enum": ["interactive", "one-shot"],
+        "description": "Required capability mode. Codex and Gemini currently support one-shot only."
+      },
+      "allowedTools": {
+        "type": "string",
+        "default": "Read,Edit,Bash(git:*,cargo:*,ls,cat),Grep,Glob",
+        "description": "Comma-separated allow-list used only by adapters that support it."
+      },
+      "timeoutMs": {
+        "type": "number",
+        "default": 300000,
+        "description": "Max ms to wait for the selected provider before killing the process."
+      },
+      "maxReplyChars": {
+        "type": "number",
+        "default": 3500,
+        "description": "Truncate the reply to this many characters (Telegram has a 4096-char hard limit)."
+      }
+    }
+  }
+}
