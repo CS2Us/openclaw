@@ -37,6 +37,12 @@ const DEFAULTS = {
   iterationTimeoutMs: 3_600_000,
 } as const;
 
+const PROVIDER_BIN_ENV: Record<NonNullable<OvernightConfig["provider"]>, string> = {
+  claude: "OPENCLAW_AGENT_BRIDGE_CLAUDE_BIN",
+  codex: "OPENCLAW_AGENT_BRIDGE_CODEX_BIN",
+  gemini: "OPENCLAW_AGENT_BRIDGE_GEMINI_BIN",
+};
+
 export function createOvernightCommand(opts: {
   pluginConfig?: unknown;
 }): OpenClawPluginCommandDefinition {
@@ -95,9 +101,23 @@ export function resolveOvernightCapabilityError(config: OvernightConfig): string
   );
 }
 
-function resolveDefaults(config: OvernightConfig) {
+export function resolveOvernightDefaults(
+  config: OvernightConfig,
+  env: NodeJS.ProcessEnv = process.env,
+) {
+  const provider = config.provider ?? "claude";
+  const configuredBin = config.agentBin?.trim();
+  const launcherBin = env[PROVIDER_BIN_ENV[provider]]?.trim();
+  if (env.OPENCLAW_AGENT_BRIDGE_BIN_RESOLUTION === "strict") {
+    const selectedBin = configuredBin || launcherBin;
+    if (!selectedBin || !path.isAbsolute(selectedBin)) {
+      throw new Error(
+        `agent-overnight: selected provider ${provider} CLI requires an absolute path resolved before launcher PATH mutation`,
+      );
+    }
+  }
   return {
-    agentBin: config.agentBin?.trim() || DEFAULTS.agentBin,
+    agentBin: configuredBin || launcherBin || DEFAULTS.agentBin,
     allowedTools: config.allowedTools?.trim() || DEFAULTS.allowedTools,
     maxIterations: config.maxIterations ?? DEFAULTS.maxIterations,
     rateLimitFallbackSleepSec:
@@ -180,7 +200,7 @@ async function handleOvernight(
     return { text: "agent-overnight: 无法解析 Telegram chat id" };
   }
 
-  const defaults = resolveDefaults(config);
+  const defaults = resolveOvernightDefaults(config);
   const stateDir = resolveStateDir(projectCwd, config.stateDir);
 
   const sid = randomUUID();

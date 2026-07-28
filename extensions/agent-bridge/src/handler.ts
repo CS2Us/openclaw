@@ -2,6 +2,7 @@
 // argv, output parsing, resume, and approval semantics stay in adapters.
 
 import { spawn } from "node:child_process";
+import { isAbsolute } from "node:path";
 import {
   buildProviderSpawnSpec,
   parseCodexJsonl,
@@ -27,6 +28,18 @@ const DEFAULTS = {
   timeoutMs: 300_000,
   maxReplyChars: 3_500,
 } as const;
+
+const PROVIDER_BIN_ENV: Record<AgentProviderId, string> = {
+  claude: "OPENCLAW_AGENT_BRIDGE_CLAUDE_BIN",
+  codex: "OPENCLAW_AGENT_BRIDGE_CODEX_BIN",
+  gemini: "OPENCLAW_AGENT_BRIDGE_GEMINI_BIN",
+};
+
+const PROVIDER_BIN_NAME: Record<AgentProviderId, string> = {
+  claude: DEFAULTS.agentBin,
+  codex: "codex",
+  gemini: "agy",
+};
 
 export type RunClaudeResult = {
   text: string;
@@ -202,12 +215,21 @@ export function truncate(text: string, max: number): string {
   return `${text.slice(0, max)}\n\n…(truncated, ${text.length - max} chars dropped)`;
 }
 
-export function resolveDefaults(config: AgentBridgeConfig) {
+export function resolveDefaults(config: AgentBridgeConfig, env: NodeJS.ProcessEnv = process.env) {
   const provider = config.provider ?? DEFAULTS.provider;
-  const defaultBin =
-    provider === "codex" ? "codex" : provider === "gemini" ? "agy" : DEFAULTS.agentBin;
+  const launcherBin = env[PROVIDER_BIN_ENV[provider]]?.trim();
+  const configuredBin = config.agentBin?.trim();
+  if (env.OPENCLAW_AGENT_BRIDGE_BIN_RESOLUTION === "strict") {
+    const selectedBin = configuredBin || launcherBin;
+    if (!selectedBin || !isAbsolute(selectedBin)) {
+      throw new Error(
+        `agent-bridge: selected provider ${provider} CLI requires an absolute path resolved before launcher PATH mutation`,
+      );
+    }
+  }
+  const defaultBin = launcherBin || PROVIDER_BIN_NAME[provider];
   return {
-    agentBin: config.agentBin?.trim() || defaultBin,
+    agentBin: configuredBin || defaultBin,
     provider,
     model: config.model?.trim() || undefined,
     reasoningEffort: config.reasoningEffort ?? "high",

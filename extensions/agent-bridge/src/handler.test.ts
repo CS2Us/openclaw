@@ -38,14 +38,59 @@ describe("provider-aware configuration", () => {
   });
 
   it("chooses a provider-specific default binary and one-shot mode", () => {
-    expect(resolveDefaults({ provider: "codex" })).toMatchObject({
+    expect(resolveDefaults({ provider: "codex" }, {})).toMatchObject({
       agentBin: "codex",
       capabilityMode: "one-shot",
     });
-    expect(resolveDefaults({ provider: "gemini" })).toMatchObject({
+    expect(resolveDefaults({ provider: "gemini" }, {})).toMatchObject({
       agentBin: "agy",
       capabilityMode: "one-shot",
     });
+  });
+
+  it("uses launcher-resolved provider binaries without overriding explicit config", () => {
+    const env = {
+      OPENCLAW_AGENT_BRIDGE_CODEX_BIN: "/opt/provider-bin/codex",
+    };
+    expect(resolveDefaults({ provider: "codex" }, env)).toMatchObject({
+      agentBin: "/opt/provider-bin/codex",
+    });
+    expect(resolveDefaults({ provider: "codex", agentBin: "/custom/codex" }, env)).toMatchObject({
+      agentBin: "/custom/codex",
+    });
+  });
+
+  it("fails closed when strict launcher resolution did not find the selected provider", () => {
+    expect(() =>
+      resolveDefaults({ provider: "codex" }, { OPENCLAW_AGENT_BRIDGE_BIN_RESOLUTION: "strict" }),
+    ).toThrow("selected provider codex CLI requires an absolute path");
+
+    expect(() =>
+      resolveDefaults(
+        { provider: "codex", agentBin: "codex" },
+        {
+          OPENCLAW_AGENT_BRIDGE_BIN_RESOLUTION: "strict",
+          OPENCLAW_AGENT_BRIDGE_CODEX_BIN: "/launcher/codex",
+        },
+      ),
+    ).toThrow("selected provider codex CLI requires an absolute path");
+
+    expect(() =>
+      resolveDefaults(
+        { provider: "codex" },
+        {
+          OPENCLAW_AGENT_BRIDGE_BIN_RESOLUTION: "strict",
+          OPENCLAW_AGENT_BRIDGE_CODEX_BIN: "relative/codex",
+        },
+      ),
+    ).toThrow("selected provider codex CLI requires an absolute path");
+
+    expect(
+      resolveDefaults(
+        { provider: "codex", agentBin: "/operator/codex" },
+        { OPENCLAW_AGENT_BRIDGE_BIN_RESOLUTION: "strict" },
+      ).agentBin,
+    ).toBe("/operator/codex");
   });
 });
 

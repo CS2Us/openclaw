@@ -25,7 +25,7 @@
       "agentBin": {
         "type": "string",
         "default": "agent",
-        "description": "Name or absolute path of the selected provider CLI."
+        "description": "Name or absolute path of the selected provider CLI. Strict launcher mode requires an absolute path."
       },
       "allowedTools": {
         "type": "string",
