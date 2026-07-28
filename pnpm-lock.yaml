@@ -312,6 +312,12 @@ importers:
         specifier: workspace:*
         version: link:../../packages/plugin-sdk
 
+  extensions/agent-bridge:
+    devDependencies:
+      '@openclaw/plugin-sdk':
+        specifier: workspace:*
+        version: link:../../packages/plugin-sdk
+
   extensions/alibaba:
     devDependencies:
       '@openclaw/plugin-sdk':
@@ -464,18 +470,6 @@ importers:
         version: link:../../packages/plugin-sdk
 
   extensions/chutes:
-    devDependencies:
-      '@openclaw/plugin-sdk':
-        specifier: workspace:*
-        version: link:../../packages/plugin-sdk
-
-  extensions/claude-bridge:
-    devDependencies:
-      '@openclaw/plugin-sdk':
-        specifier: workspace:*
-        version: link:../../packages/plugin-sdk
-
-  extensions/claude-overnight:
     devDependencies:
       '@openclaw/plugin-sdk':
         specifier: workspace:*
